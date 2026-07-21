@@ -1,4 +1,4 @@
-# Continuous deployment to Fly.io on every push to main.
+# Continuous deployment to Fly.io on every push to dev.
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
 #
 # Setup (once): create a deploy token and add it as a repo secret named
@@ -11,7 +11,7 @@ name: Fly Deploy
 on:
   push:
     branches:
-      - main
+      - dev
 jobs:
   deploy:
     name: Deploy app
