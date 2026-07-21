@@ -26,6 +26,9 @@ qdrant_storage/
 node_modules/
 dist/
 
+# Benchmark
+benchmark/
+
 # OS / editor
 .DS_Store
 .idea/

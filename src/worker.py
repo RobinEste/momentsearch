@@ -1,0 +1,33 @@
+"""Ingest worker entrypoint — serves the Prefect flow.
+
+    python -m src.worker
+
+flow.serve() registers the "ms-ingest-video/ingest" deployment in Prefect Cloud
+(idempotent) and long-polls for scheduled runs — outbound HTTPS only, no
+ports. Scale horizontally by running more replicas of this process; each
+executes up to WORKER_CONCURRENCY runs at once.
+
+Sample seeding is NOT done here — it's a one-shot startup gate (seed.py /
+src/seeding.py) that the whole stack waits on, so the app never serves a
+half-indexed corpus. This worker only handles user uploads + YouTube adds.
+
+Embedding goes to the warm CLIP service when CLIP_SERVICE_URL is set
+(docker-compose default); unset, each run loads the model in-process.
+"""
+import os
+
+from .db import init_schema
+from .ingest.pipeline import ingest_video
+
+
+def main():
+    init_schema()  # make sure migrations ran before consuming runs
+    from .rag import vector_store
+    vector_store.ensure_collection()  # up front, not mid-first-ingest
+    limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
+    print(f"[worker] serving deployment 'ms-ingest-video/ingest' (concurrency {limit})")
+    ingest_video.serve(name="ingest", limit=limit)
+
+
+if __name__ == "__main__":
+    main()
