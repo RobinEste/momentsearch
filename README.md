@@ -2,7 +2,7 @@
 
 **Ask questions about your videos and get answers grounded in the exact moments — by what's _seen_ on screen.**
 
-🌐 **Landing page:** [momentsearch.vercel.app](https://momentsearch.vercel.app/)
+🌐 **Live app:** [momentsearch.fly.dev](https://momentsearch.fly.dev/get-started)
 
 MomentSearch is an open-source, production-shaped stack for **visual** video
 search and RAG. Users upload videos (or paste YouTube URLs); background workers

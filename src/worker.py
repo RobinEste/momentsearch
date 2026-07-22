@@ -15,6 +15,7 @@ Embedding goes to the warm CLIP service when CLIP_SERVICE_URL is set
 (docker-compose default); unset, each run loads the model in-process.
 """
 import os
+import time
 
 from .db import init_schema
 from .ingest.pipeline import ingest_video
@@ -29,8 +30,19 @@ def main():
     from . import dispatcher
     dispatcher.start_in_background()
     limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
-    print(f"[worker] serving deployment 'ms-ingest-video/ingest' (concurrency {limit})")
-    ingest_video.serve(name="ingest", limit=limit)
+    # serve() talks to Prefect Cloud on startup; a transient outage (e.g. a 503)
+    # used to crash the worker permanently and stop the machine. Self-heal:
+    # retry forever so a blip pauses ingest instead of killing the worker.
+    while True:
+        try:
+            print(f"[worker] serving deployment 'ms-ingest-video/ingest' (concurrency {limit})")
+            ingest_video.serve(name="ingest", limit=limit)
+            break  # clean shutdown
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            print(f"[worker] serve crashed: {type(exc).__name__}: {exc} — retrying in 15s")
+            time.sleep(15)
 
 
 if __name__ == "__main__":
