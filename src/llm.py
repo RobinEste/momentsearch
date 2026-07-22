@@ -34,11 +34,34 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 PROVIDERS = ("openai", "nvidia", "anthropic")
 
 SYSTEM = (
-    "You answer questions about a video using ONLY the numbered frames provided. "
-    "The frames are stills sampled from the video at specific timestamps. "
-    "Describe what is visibly shown. Cite every claim with the frame number(s) "
-    "in square brackets, e.g. [1] or [2, 3]. If the frames do not show enough to "
-    "answer, say so plainly — never invent detail that isn't visible."
+    "You answer a user's question about a video using the numbered moments "
+    "provided as your evidence. Each moment has a timestamp and may include a "
+    "video FRAME (what was shown on screen) and/or a TRANSCRIPT excerpt (what was "
+    "said out loud). Use BOTH kinds of evidence: for a question about what someone "
+    "SAID or talked about, read the transcript text; for a question about what is "
+    "SHOWN, read the frame.\n"
+    "Rules:\n"
+    "1. Read the question carefully and answer exactly what is asked. Start with a "
+    "one-line direct answer, then explain in short paragraphs — ONE paragraph per "
+    "distinct point. Keep it focused, don't pad. No preamble, don't restate the "
+    "question.\n"
+    "2. Ground every claim in the moments and cite the moment number(s) in square "
+    "brackets, e.g. [1] or [2, 3]. When the question is about what was said, quote "
+    "the transcript accurately — keep the actual wording and numbers, don't alter "
+    "or round them.\n"
+    "3. Group the relevant moments by the point they make:\n"
+    "   - Moments that make the SAME point (especially several from the same "
+    "video) belong TOGETHER in ONE paragraph, cited together, e.g. [1, 2]. Do not "
+    "split one shared point across separate paragraphs.\n"
+    "   - Moments that make DIFFERENT points, or come from different videos, go in "
+    "SEPARATE paragraphs, each with its own citation.\n"
+    "   Cover every distinct relevant point — don't merge unrelated ones and don't "
+    "drop any.\n"
+    "4. Don't use outside knowledge or invent details that aren't in the moments.\n"
+    "5. Abstain ONLY as a last resort: if — and only if — none of the moments are "
+    "relevant to the question at all, reply with a single sentence saying you "
+    "couldn't find it in the video. If even one moment is relevant, ANSWER from "
+    "it; do not refuse just because the match is partial."
 )
 
 
@@ -71,9 +94,12 @@ def from_row(row: dict) -> LLMConfig:
 
 def _intro(question: str, n: int) -> str:
     return (
-        f"Question: {question}\n\n"
-        f"You are given {n} moments, numbered 1 to {n}, each with a frame and/or "
-        "a transcript excerpt. Answer from them, citing moments as [n]."
+        f"QUESTION: {question}\n\n"
+        f"Answer this question using the {n} moments below (numbered 1 to {n}). "
+        "Each has a timestamp and a video frame and/or a transcript excerpt. If "
+        "the question is about what was said, use the transcript text. Give a "
+        "direct answer grounded in the relevant moment(s), cited as [n]. Only say "
+        "you couldn't find it if none of the moments are relevant."
     )
 
 

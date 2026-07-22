@@ -45,6 +45,8 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
         return out
 
     windows: list[dict] = []
+    # Hits arrive best-first (rrf desc), so the first hit landing in a window for
+    # a given modality is that modality's best hit there.
     for h in sorted(ranked(visual_hits, "frame") + ranked(text_hits, "text"),
                     key=lambda x: x["rrf"], reverse=True):
         w = next((w for w in windows if w["video_id"] == h["video_id"]
@@ -53,12 +55,19 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
             w = {"video_id": h["video_id"], "t": h["t"], "rrf": 0.0,
                  "modalities": set(), "frame": None, "text": None}
             windows.append(w)
-        w["rrf"] += h["rrf"]
         w["modalities"].add(h["modality"])
         slot = "frame" if h["modality"] == "frame" else "text"
-        if w[slot] is None or h["rrf"] > w[slot]["rrf"]:
+        # Keep only the BEST hit per modality. Summing every hit would let a
+        # burst of near-identical frames clustered in one 15s window inflate its
+        # score past a genuine frame+transcript match — the bug that ranked a
+        # silent frame-burst above the moment that actually answered.
+        if w[slot] is None:
             w[slot] = h
     for w in windows:
+        # Score = best frame + best transcript hit; ×boost when BOTH modalities
+        # agree at this instant (two independent signals = strongest evidence).
+        w["rrf"] = (w["frame"]["rrf"] if w["frame"] else 0.0) + \
+                   (w["text"]["rrf"] if w["text"] else 0.0)
         if {"frame", "text"} <= w["modalities"]:
             w["rrf"] *= CROSS_MODAL_BOOST
     windows.sort(key=lambda w: w["rrf"], reverse=True)
