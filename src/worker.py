@@ -24,6 +24,10 @@ def main():
     init_schema()  # make sure migrations ran before consuming runs
     from .rag import vector_store
     vector_store.ensure_collection()  # up front, not mid-first-ingest
+    # Fair scheduler (WFQ): admits pending videos round-robin across users so
+    # one bulk uploader can't starve everyone else (src/dispatcher.py).
+    from . import dispatcher
+    dispatcher.start_in_background()
     limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
     print(f"[worker] serving deployment 'ms-ingest-video/ingest' (concurrency {limit})")
     ingest_video.serve(name="ingest", limit=limit)

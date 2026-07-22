@@ -26,7 +26,9 @@ primary_region = 'iad'
 [processes]
   api = 'uvicorn src.app:app --host 0.0.0.0 --port 8000'
   worker = 'python -m src.worker'
-  clip = 'uvicorn src.clip_service:app --host 0.0.0.0 --port 8001'
+  # Must bind IPv6 (::) — Fly private networking (*.internal, used by
+  # CLIP_SERVICE_URL) is IPv6-only; 0.0.0.0 would be unreachable internally.
+  clip = 'uvicorn src.clip_service:app --host :: --port 8001'
 
 [env]
   # Fly private networking: <process>.process.<app>.internal resolves to the

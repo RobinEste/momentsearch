@@ -5,9 +5,12 @@
 #   Seed  (python -m src.seed)             — one-shot sample gate, then exits
 FROM python:3.11-slim
 
-# FFmpeg is required for frame sampling (worker); tiny cost on the API image.
+# ffmpeg = frame sampling. nodejs = the JavaScript runtime yt-dlp needs to
+# extract YouTube formats (without it, EVERY YouTube video fails with "This
+# video is not available"). Both matter only to the worker but cost little here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -12,7 +12,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from .config import DATABASE_URL
+from .config import DATABASE_URL, INFLIGHT_STATUSES
 
 _pool: ConnectionPool | None = None
 _pool_pid: int | None = None
@@ -173,6 +173,56 @@ def videos_by_ids(ids: list[str]) -> dict[str, dict]:
 def delete_video(video_id: str) -> None:
     with pool().connection() as conn:
         conn.execute("DELETE FROM ms_videos WHERE id = %s", (video_id,))
+
+
+# ── Fair scheduling (WFQ) ────────────────────────────────────────────────────
+
+def count_inflight() -> int:
+    """How many videos currently occupy execution capacity (scheduled/running)."""
+    with pool().connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM ms_videos WHERE status = ANY(%s)",
+            (list(INFLIGHT_STATUSES),),
+        ).fetchone()
+    return row["n"] if row else 0
+
+
+def wfq_claim(limit: int) -> list[dict]:
+    """Atomically claim up to `limit` pending videos in FAIR (round-robin across
+    users) order, flipping them pending -> queued. Returns the claimed rows.
+
+    Fairness: rank each user's pending videos by age (row_number partitioned by
+    user_id), then order by that rank first — so we take everyone's oldest, then
+    everyone's 2nd, ... A user who dumped 50 videos only gets one slot per round,
+    exactly like the others. The UPDATE ... WHERE status='pending' RETURNING is
+    the atomic claim: if two dispatchers race, each row is handed out once.
+    """
+    if limit <= 0:
+        return []
+    with pool().connection() as conn:
+        picked = conn.execute(
+            """
+            SELECT id FROM (
+                SELECT id, row_number() OVER (
+                    PARTITION BY user_id ORDER BY created_at, id) AS rn
+                FROM ms_videos WHERE status = 'pending'
+            ) t
+            ORDER BY rn, id
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+        ids = [r["id"] for r in picked]
+        if not ids:
+            return []
+        return conn.execute(
+            """
+            UPDATE ms_videos SET status = 'queued', updated_at = now()
+            WHERE id = ANY(%s) AND status = 'pending'
+            RETURNING id, user_id
+            """,
+            (ids,),
+        ).fetchall()
 
 
 # ── Bring-your-own-model (per-tenant LLM endpoint) ───────────────────────────

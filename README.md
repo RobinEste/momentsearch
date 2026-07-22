@@ -260,15 +260,34 @@ the zero-service simple mode for cloners.
 **Deletes purge everything** — `DELETE /api/videos/{id}` removes the vectors
 (by filter), thumbnails + raw upload (batch delete), and the manifest row.
 
-**Later, under real load** (design room exists, not built): per-tenant quotas
-and fair scheduling, backpressure on queue depth, Redis query cache,
-OCR/transcript hybrid search as a second retrieval branch.
+**Fair scheduling (WFQ).** The queue is fair, not FIFO. If it enqueued every
+video to Prefect at register time, Prefect would run them in submitted order —
+one user who uploads 50 videos blocks everyone behind them. Instead videos wait
+`pending` in Postgres and a **dispatcher** ([src/dispatcher.py](src/dispatcher.py))
+admits them **round-robin across users**, keeping only `DISPATCH_MAX_INFLIGHT`
+running at once. So the waiting line lives in *our* DB, fairly ordered
+([`db.wfq_claim`](src/db.py) ranks each user's videos by age and takes
+everyone's oldest first, then everyone's second, …) — no user can starve the
+others. Set `ENABLE_FAIR_DISPATCH=false` to fall back to plain FIFO and see the
+difference. `DISPATCH_MAX_INFLIGHT` should equal your real capacity
+(`worker machines × WORKER_CONCURRENCY`); anything above that would just pile up
+FIFO inside Prefect and defeat the fairness.
+
+```
+FIFO:  user A ▓▓▓▓▓▓▓▓▓▓ (50)  then→  user B ▓   ← B waits for all of A
+WFQ:   A▓ B▓ A▓ B▓ A▓ B▓ …            ← interleaved; B is served immediately
+```
+
+**Later, under real load** (design room exists, not built): per-tenant *quotas*
+and weights (the dispatcher's round-robin extends to weighted shares),
+backpressure on queue depth, Redis query cache, OCR/transcript hybrid search.
 
 ## Deploy (Fly.io)
 
-One image, **three process groups** from [fly.toml](fly.toml) — `api`,
-`worker`, and `clip` (each on its own machine size, each scaled by its own
-bottleneck):
+Full step-by-step guide: **[DEPLOYMENT.md](DEPLOYMENT.md)**. The short version —
+one image, **three process groups** from [fly.toml](fly.toml) — `api`, `worker`,
+and `clip` (each on its own machine size, each scaled by its own bottleneck; the
+"what's scaled and why" table above explains the split):
 
 ```powershell
 fly launch --no-deploy --copy-config          # create the app (once)
@@ -396,15 +415,17 @@ the four entrypoints as top-level modules in the package.
 
 ## Known limits
 
-- **YouTube downloads.** yt-dlp queries the `tv`/`android` player clients first
-  (the plain `web` client is increasingly served "This video is not available").
-  If *every* YouTube video still fails, the IP is blocked — normal on
-  cloud/datacenter hosts. The fix that works **everywhere** is cookies: export
-  a `cookies.txt` from a logged-in browser and supply it via `YT_COOKIES_FILE`
-  (mounted file, local) or `YT_COOKIES_B64` (base64 secret, e.g.
-  `fly secrets set YT_COOKIES_B64="$(base64 -w0 cookies.txt)"` on cloud).
-  Cookies expire in a few weeks — re-export when it starts failing. Uploads are
-  never affected by any of this.
+- **YouTube downloads.** Modern yt-dlp (2025+) needs a **JavaScript runtime +
+  its EJS challenge-solver** to extract YouTube formats at all — without them
+  every video fails "This video is not available." The Docker image installs
+  **Node** and the worker fetches the solver automatically, so this works out
+  of the box; for bare-process dev, install `node` or `deno`. **Cookies** then
+  get past sign-in/bot-checks and work **everywhere** (home and datacenter):
+  export a `cookies.txt` from a logged-in browser and supply it via
+  `YT_COOKIES_FILE` (mounted file, local) or `YT_COOKIES_B64` (base64 secret,
+  e.g. `fly secrets set YT_COOKIES_B64="$(base64 -w0 data/cookies.txt)"` on
+  cloud). Cookies expire in a few weeks — re-export when it starts failing.
+  Uploads are never affected by any of this.
 - The embedded local Qdrant (`QDRANT_URL` empty) can't be shared by API and
   worker concurrently — single-process dev only; compose runs a real Qdrant.
 - Faithfulness ceiling is *near*-zero, not zero — the gate + citations remove

@@ -219,7 +219,8 @@ async function loadVideos(){
   function badge(v){
     switch(v.status){
       case "indexed":   return {icon:"✓", label:`${v.frame_count||0}f · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
-      case "pending":   return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
+      case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
+      case "queued":    return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
       case "fetching":  return {icon:"⏬", label:"fetching video…",  c:"text-[#8a6d1a]"};
       case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
       case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};
@@ -293,7 +294,7 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
    queued (you can add more right away) and let a single background refresher
    update the chips until nothing is processing. Per-video progress shows on
    the chips themselves (sampling… / embedding 40%). */
-const _INFLIGHT=["pending","fetching","sampling","embedding"];
+const _INFLIGHT=["pending","queued","fetching","sampling","embedding"];
 let _refresher=null;
 function startRefresher(){
   if(_refresher) return;

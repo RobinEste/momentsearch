@@ -63,22 +63,33 @@ def _cookiefile() -> str | None:
 
 
 def _yt_opts(video_id: str, clients: list[str]) -> dict:
-    from ..config import YT_PROXY_URL
+    from ..config import YT_JS_RUNTIMES, YT_PROXY_URL, YT_REMOTE_COMPONENTS
 
     opts = {
-        # Video-only stream <=480p — we never touch the audio.
+        # We only sample frames — audio and resolution don't matter, smaller is
+        # better. Prefer a <=480p video-only stream, but fall back through ANY
+        # video-only stream (the tv/android/ios clients mostly return adaptive
+        # video-only formats) and finally ANY format at all, so this never
+        # errors "Requested format is not available".
         "format": ("bestvideo[height<=480][ext=mp4]/bestvideo[height<=480]/"
-                   "best[height<=480][ext=mp4]/best[height<=480]/best"),
+                   "best[height<=480][ext=mp4]/best[height<=480]/"
+                   "bestvideo[ext=mp4]/bestvideo/best"),
         "outtmpl": str(scratch_dir() / f"{video_id}.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        # Query the reliable player clients up front. YouTube increasingly
-        # serves the default *web* client no playable formats ("This video is
-        # not available") or a bot-check; the tv/android/ios clients still
-        # return formats. yt-dlp tries them in order and uses whichever works.
-        "extractor_args": {"youtube": {"player_client": clients}},
     }
+    # Only override the player client when asked (empty = yt-dlp's default,
+    # which is best once a JS runtime is available). Forcing tv/android is a
+    # fallback for when the default fails.
+    if clients:
+        opts["extractor_args"] = {"youtube": {"player_client": clients}}
+    # JS runtime + EJS solver — required by modern yt-dlp to extract YouTube
+    # formats at all (see config). Node ships in the Docker image.
+    if YT_JS_RUNTIMES:
+        opts["js_runtimes"] = {r: {} for r in YT_JS_RUNTIMES}
+    if YT_REMOTE_COMPONENTS:
+        opts["remote_components"] = list(YT_REMOTE_COMPONENTS)
     # Cookies are the durable fix when the IP itself is blocked (datacenter);
     # a residential proxy is the alternative. See .env.example.
     cookies = _cookiefile()

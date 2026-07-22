@@ -69,7 +69,11 @@ STORAGE_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip() or _PROVIDER_END
 def gcs_service_account_info() -> dict:
     """Service-account JSON for STORAGE_PROVIDER=gcp_native, rebuilt from the
     GOOGLE_CLOUD_* env vars (the standard exploded-JSON convention)."""
-    key = os.getenv("GOOGLE_CLOUD_PRIVATE_KEY", "")
+    key = os.getenv("GOOGLE_CLOUD_PRIVATE_KEY", "").strip()
+    # dotenv strips surrounding quotes locally, but `fly secrets import` keeps
+    # them literally — strip defensively so the PEM is valid in both places.
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1]
     return {
         "type": "service_account",
         "project_id": os.getenv("GOOGLE_CLOUD_PROJECT_ID", ""),
@@ -99,10 +103,28 @@ MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 2048)                # register rejects bi
 ALLOWED_UPLOAD_TYPES = ("video/",)                         # content-type must start with
 
 # --- Video ingest lifecycle ---------------------------------------------------
+# pending  = registered, waiting in our fair queue (not yet sent to Prefect)
+# queued   = the dispatcher picked it and scheduled a Prefect run
 # fetching = acquiring the source file; sampling = frames + dedup + thumbnails;
 # embedding = CLIP + Qdrant upsert; skipped = duplicate (user_id, source_hash).
-VIDEO_STATUSES = ("pending", "fetching", "sampling", "embedding",
+VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
                   "indexed", "skipped", "failed")
+# In-flight = occupying execution capacity (scheduled or running).
+INFLIGHT_STATUSES = ("queued", "fetching", "sampling", "embedding")
+
+# --- Fair scheduling (WFQ) ----------------------------------------------------
+# FIFO (default off): register enqueues to Prefect immediately -> Prefect runs
+# them in submitted order, so one user with 50 videos blocks everyone behind
+# them. Fair dispatch (WFQ, on): videos wait `pending` in Postgres and a
+# dispatcher admits them round-robin ACROSS users, keeping only
+# DISPATCH_MAX_INFLIGHT running at once — so the waiting line is fairly ordered
+# in OUR DB, not FIFO inside Prefect. No user can starve the others.
+ENABLE_FAIR_DISPATCH = _envbool("ENABLE_FAIR_DISPATCH", True)
+# Max videos executing at once. Set to your total capacity:
+# (worker machines) x WORKER_CONCURRENCY — anything above that would just pile
+# up FIFO inside Prefect and defeat the fairness.
+DISPATCH_MAX_INFLIGHT = _int("DISPATCH_MAX_INFLIGHT", _int("WORKER_CONCURRENCY", 2))
+DISPATCH_INTERVAL_S = _float("DISPATCH_INTERVAL_S", 3.0)  # how often the dispatcher tops up
 
 # --- Frame sampling (the biggest scaling lever) --------------------------------
 # interval: one frame every FRAME_INTERVAL_SEC (widened to respect MAX_FRAMES).
@@ -157,13 +179,23 @@ EMBED_VERSION = os.getenv("EMBED_VERSION", f"{CLIP_MODEL}-v1")
 YT_COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip()
 YT_COOKIES_B64 = os.getenv("YT_COOKIES_B64", "").strip()
 YT_PROXY_URL = os.getenv("YT_PROXY_URL", "").strip()
-# Player clients tried on the FIRST download (yt-dlp uses whichever returns
-# formats). The web client is deliberately last — it's the one YouTube most
-# often serves "not available"/bot-checks. Fallback set is tried if all fail.
+# Player clients. Default EMPTY = let yt-dlp pick (best, once a JS runtime is
+# present — see below). Forcing tv/android used to help pre-JS-runtime, but now
+# those clients hand back media URLs that 403 on download, so we only fall back
+# to them if the default attempt fails outright.
 YT_PLAYER_CLIENTS = [c.strip() for c in
-                     os.getenv("YT_PLAYER_CLIENTS", "tv,android,web").split(",") if c.strip()]
+                     os.getenv("YT_PLAYER_CLIENTS", "").split(",") if c.strip()]
 YT_FALLBACK_CLIENTS = [c.strip() for c in
-                       os.getenv("YT_FALLBACK_CLIENTS", "ios,mweb,web_safari").split(",") if c.strip()]
+                       os.getenv("YT_FALLBACK_CLIENTS", "tv,android,ios").split(",") if c.strip()]
+# yt-dlp 2025+ needs a JavaScript runtime to compute YouTube signatures, plus
+# its EJS challenge-solver component — WITHOUT these every video fails with
+# "This video is not available" / "Requested format is not available". The
+# Dockerfile installs Node; these tell yt-dlp to use it + fetch the solver.
+# (For bare-process dev, install node or deno yourself.)
+YT_JS_RUNTIMES = [c.strip() for c in
+                  os.getenv("YT_JS_RUNTIMES", "node").split(",") if c.strip()]
+YT_REMOTE_COMPONENTS = [c.strip() for c in
+                        os.getenv("YT_REMOTE_COMPONENTS", "ejs:github").split(",") if c.strip()]
 
 # --- Sample corpus ------------------------------------------------------------
 # On boot the worker auto-ingests the four "Deep Dive into LLMs" sample talks

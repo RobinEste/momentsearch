@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import db, jobs, storage
+from .. import config, db, jobs, storage
 from ..samples import is_sample
 from ..config import (
     ADMIN_TOKEN,
@@ -141,6 +141,10 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
     else:
         raise HTTPException(400, "Provide either url (YouTube) or video_id+key (upload).")
 
+    # Fair dispatch (WFQ): leave it `pending` — the dispatcher admits it in fair
+    # order (src/dispatcher.py). FIFO mode: enqueue to Prefect immediately.
+    if config.ENABLE_FAIR_DISPATCH:
+        return {"video_id": row["id"], "status": "pending"}
     flow_run_id = jobs.enqueue_video(row["id"], uid)
     return {"video_id": row["id"], "status": row["status"], "flow_run_id": flow_run_id}
 
@@ -178,6 +182,8 @@ def retry(video_id: str, uid: str = Depends(user_id)):
     if row is None or row["user_id"] != uid:
         raise HTTPException(404, "Video not found.")
     db.set_status(video_id, "pending", error=None)
+    if config.ENABLE_FAIR_DISPATCH:
+        return {"video_id": video_id, "status": "pending"}  # dispatcher re-admits it fairly
     flow_run_id = jobs.enqueue_video(video_id, uid)
     return {"video_id": video_id, "status": "pending", "flow_run_id": flow_run_id}
 
