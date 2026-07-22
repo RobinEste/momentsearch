@@ -36,52 +36,62 @@ rented managed service, stateless = this repo's code.** Every API box and
 worker is disposable; durable state lives in object storage, Qdrant and
 Postgres — "nothing on local."
 
-Two paths that scale in opposite directions and never share a request:
+Two paths that scale in opposite directions and never share a request — the
+**write path** (slow, background: the API answers `202` instantly and workers do
+the work) and the **read path** (fast: retrieval is ~ms, the LLM call dominates
+cost):
 
+```mermaid
+flowchart LR
+  user(["Browser / UI"])
+
+  subgraph repo["MomentSearch — one Docker image, stateless (this repo)"]
+    direction TB
+    api["API<br/>presign · register · /ask · UI"]
+    disp["WFQ dispatcher<br/>fair round-robin across users"]
+    worker["Worker(s)<br/>fetch · sample · dedup · embed · transcript"]
+    clip["CLIP service<br/>one warm model (CPU → GPU)"]
+  end
+
+  subgraph managed["Managed services — stateful (rented)"]
+    direction TB
+    obj[("Object storage<br/>S3 / GCS / Tigris")]
+    pg[("Neon Postgres<br/>manifest · status · hashes")]
+    prefect[("Prefect Cloud<br/>queue · retries · dashboard")]
+    qdrant[("Qdrant Cloud<br/>moments + moments_text")]
+    vlm[("Vision LLM<br/>OpenAI · vLLM · Anthropic")]
+  end
+
+  %% write path (green)
+  user -->|"① presign"| api
+  user -->|"② PUT bytes"| obj
+  user -->|"③ register"| api
+  api -->|"pending row"| pg
+  api -->|"enqueue"| disp
+  disp -->|"admit ≤ MAX_INFLIGHT"| prefect
+  prefect -->|"run"| worker
+  worker -->|"download / thumbs"| obj
+  worker -->|"embed batches"| clip
+  worker -->|"upsert vectors"| qdrant
+  worker -->|"status"| pg
+
+  %% read path (orange)
+  user -->|"ask"| api
+  api -->|"embed query"| clip
+  api -->|"kNN · both branches"| qdrant
+  api -->|"frames + transcript"| vlm
+
+  classDef repoN fill:#fff3ec,stroke:#e2683c,color:#7a2f14;
+  classDef mgmtN fill:#eef4ff,stroke:#3b6ea8,color:#173a63;
+  class api,disp,worker,clip repoN;
+  class obj,pg,prefect,qdrant,vlm mgmtN;
 ```
-WRITE PATH — slow, background (API answers 202 instantly; workers do the work)
 
- browser ─1. POST /api/videos/presign─► API            ┌───────────────┐
- browser ─2. PUT video ───────► Object storage         │ Neon Postgres │ manifest, status, hashes
- browser ─3. POST /api/videos (register) ─► API ───────┤ Prefect Cloud │ queue, retries, dashboard
-                │ insert 'pending' row                  └───────────────┘
-                ▼
-     WFQ dispatcher — fair, round-robin across users (src/dispatcher.py)
-                │ admit up to DISPATCH_MAX_INFLIGHT
-                ▼
-     Worker (src/worker.py), WORKER_CONCURRENCY runs per machine:
-        fetch (yt-dlp | bucket) → sample (ffmpeg→memory) → pHash dedup
-          → embed frames ──────► CLIP service ──► Qdrant 'moments'       (visual)
-          → transcript (YouTube captions → bge) ──► Qdrant 'moments_text'  (text)
-        pending → fetching → sampling → embedding → indexed | skipped | failed
-
-     CLIP service (src/clip_service.py) — ONE warm model behind CLIP_SERVICE_URL;
-     api + workers send batches to it; scale it up / onto a GPU on its own.
-
-
-READ PATH — fast (retrieval is ~ms; the multimodal LLM call dominates cost)
-
- question ──► POST /api/ask
-      │   query BOTH branches in parallel, always — no router
-      ├─ visual branch  CLIP text-embed ─► Qdrant kNN 'moments'       ┐ user_id-filtered,
-      └─ text branch    bge query-embed ─► Qdrant kNN 'moments_text'  ┘ int8, rescored
-                                   │           (text branch: YouTube only)
-                                   ▼
-   ┌──────────── SCORING MODULE — src/rag/search.py :: _fuse ──────────────┐
-   │  1. RRF          rank each branch on its own; score = 1/(RRF_K+rank)   │
-   │  2. time-window  group hits within FUSION_WINDOW_S s (same video) →    │
-   │                  one 'moment'; sum their RRF                           │
-   │  3. cross-modal  ×CROSS_MODAL_BOOST when a frame AND a transcript      │
-   │                  chunk agree at the same instant (strongest signal)    │
-   └───────────────────────────────┬───────────────────────────────────────┘
-                                   ▼  top-TOP_K fused moments
-                 Gate 1 — both raw branch-bests below threshold?
-                   └─ yes → abstain, no LLM call ("couldn't find that")
-                                   │ no
-                                   ▼
-        vision LLM reads each moment's frame + transcript excerpt →
-        cited answer ([n] validated; every timestamp comes from a payload)
-```
+The **write path** flows ①→③ then dispatcher → worker → (object storage +
+CLIP + Qdrant + Postgres). The **read path** is a single `ask` that fans out to
+the CLIP service and both Qdrant collections, then to the vision LLM. The
+retrieval + scoring detail of that read path is the [RAG at scale](#rag-at-scale)
+diagram below.
 
 The whole system is **one Docker image** with four entrypoints (the command
 picks which): the API, the ingest worker, the CLIP service, and a one-shot
@@ -268,10 +278,59 @@ trimmed to filter/display fields; titles/URLs live in Postgres and join at
 answer time. `embed_version` on every point means a future CLIP upgrade can
 re-embed in the background without breaking the live index.
 
-## What's scaled, and why
+## RAG at scale
 
-The design separates the four processes precisely so each scales on its **own**
-bottleneck, independently — that's the whole point of splitting them out:
+The read path in detail — one `ask` fans out to **both** retrieval branches,
+they're fused by a rank-based scoring module, gated for confidence, then (only
+if it clears the gate) synthesized by a vision LLM. The dashed notes mark where
+each stage **scales** as the corpus and traffic grow:
+
+```mermaid
+flowchart TB
+  q(["Question + user_id"])
+  ve["visual branch<br/>CLIP text-embed"]
+  te["text branch<br/>bge query-embed"]
+  q --> ve
+  q --> te
+
+  ve -->|"kNN, user_id filter"| vq[("Qdrant 'moments'<br/>int8 · on-disk · rescore")]
+  te -->|"kNN, user_id filter"| tq[("Qdrant 'moments_text'<br/>YouTube transcripts")]
+
+  vq --> fuse
+  tq --> fuse
+
+  subgraph fuse["Scoring module — src/rag/search.py :: _fuse"]
+    direction TB
+    r["① RRF — rank each branch on its own<br/>score = 1 / (RRF_K + rank)"]
+    w["② time-window — group hits ≤ FUSION_WINDOW_S s<br/>(same video) into one 'moment'"]
+    b["③ best-per-modality + ×CROSS_MODAL_BOOST<br/>when a frame AND transcript agree at that instant"]
+    r --> w --> b
+  end
+
+  fuse -->|"top-TOP_K fused moments"| gate{"Gate 1<br/>both raw branch-bests<br/>below threshold?"}
+  gate -->|"yes"| ab(["Abstain — no LLM call"])
+  gate -->|"no"| llm["Vision LLM<br/>frame + transcript per moment<br/>cite [n]; timestamps from payload"]
+  llm --> ans(["Grouped, cited answer"])
+
+  %% scaling notes
+  sc1>"Qdrant: int8 + on-disk + rescore<br/>→ shard when one node is outgrown"] -.- vq
+  sc2>"Embedding is a URL: CLIP service<br/>scales up / onto a GPU on its own"] -.- ve
+  sc3>"LLM call dominates cost — so few<br/>moments, downscaled, gated FIRST"] -.- llm
+
+  classDef store fill:#eef4ff,stroke:#3b6ea8,color:#173a63;
+  classDef note fill:#fffbe6,stroke:#c9a227,color:#6b5410;
+  class vq,tq store;
+  class sc1,sc2,sc3 note;
+```
+
+Why this shape holds up as the corpus grows: **retrieval is milliseconds and the
+multimodal LLM call is seconds**, so the funnel spends its cheap budget widely
+(both branches, always) and its expensive budget narrowly (a handful of gated,
+downscaled moments). Each box below scales on its own bottleneck, independently —
+that's the whole point of splitting the four processes out:
+
+| Component | Scales by | Because its bottleneck is… | How |
+|---|---|---|---|
 
 | Component | Scales by | Because its bottleneck is… | How |
 |---|---|---|---|

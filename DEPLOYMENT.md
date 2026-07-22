@@ -59,9 +59,20 @@ All commands assume you're in the repo root. On Windows use PowerShell.
 
 ### 1. Authenticate
 
+`flyctl` reads the `FLY_API_TOKEN` env var. The token lives in `.env` as
+`FLY_IO_TOKEN` — load it into the session (this also works headless/CI, no
+browser login needed):
+
 ```powershell
-$env:FLY_API_TOKEN = (Select-String '^FLY_IO_TOKEN=' .env).Line -replace '^FLY_IO_TOKEN=',''
+$env:FLY_API_TOKEN = ((Select-String '^FLY_IO_TOKEN=' .env).Line -replace '^FLY_IO_TOKEN=','').Trim().Trim('"')
 fly auth whoami        # confirm it's your account
+```
+
+Bash equivalent:
+
+```bash
+export FLY_API_TOKEN="$(grep '^FLY_IO_TOKEN=' .env | cut -d= -f2- | tr -d '\r\"')"
+fly auth whoami
 ```
 
 ### 2. Create the app (once)
@@ -97,6 +108,19 @@ fly secrets set YT_COOKIES_B64="$b64"
 fly deploy --ha=false
 ```
 
+> **If the build fails with a 403** — e.g. `error building: ... (status 403):
+> Your account has been marked as high risk`, or the remote builder is otherwise
+> refused/unavailable — build the image **locally** instead (needs Docker Desktop
+> running) so it never touches Fly's remote builder:
+>
+> ```powershell
+> fly deploy --ha=false --local-only
+> ```
+>
+> This builds with your local Docker daemon and pushes the finished image to
+> `registry.fly.io`. Alternatively, verify the account at
+> <https://fly.io/high-risk-unlock> to use the remote builder.
+
 On deploy, fly.toml's `release_command` runs the **seed gate** first
 (`python -m src.seed`). Because the samples are already indexed in your shared
 Qdrant/Neon, it exits in seconds and the app goes live. If it can't verify the
@@ -123,13 +147,19 @@ The `api` machine auto-stops when idle and auto-starts on the next request
 
 ## CI/CD (optional)
 
-`.github/workflows/fly-deploy.yml` redeploys on every push (see the branch it
-targets). One-time setup — add a deploy token as the `FLY_API_TOKEN` repo secret:
+`.github/workflows/fly-deploy.yml` redeploys automatically on **every push to
+`dev`** (it runs `flyctl deploy --remote-only`). One-time setup — add a deploy
+token as the `FLY_API_TOKEN` repo secret:
 
 ```powershell
 fly tokens create deploy -x 999999h
 # GitHub → Settings → Secrets and variables → Actions → New repository secret
 ```
+
+> CI uses Fly's **remote** builder, so if the account is flagged "high risk"
+> (see Troubleshooting) CI deploys fail there too — unlock the account, or deploy
+> manually with `fly deploy --local-only` from a machine that has Docker until
+> it's cleared.
 
 ## Cost (rough)
 
@@ -147,6 +177,11 @@ the clip service) is a burst cost only — rent it for a big backfill, kill it a
 
 ## Troubleshooting
 
+- **Build fails with 403 / "high risk account" / remote builder error** → Fly's
+  shared remote builder refused the build. Build locally instead:
+  `fly deploy --ha=false --local-only` (needs Docker Desktop running), or unlock
+  the account at <https://fly.io/high-risk-unlock>. This is a builder/account
+  issue, not a code issue — the same image builds fine locally.
 - **Deploy aborts on release_command** → the seed gate couldn't verify samples.
   Check `fly logs`; usually a bad `DATABASE_URL`/`QDRANT_URL` secret. Set
   `SEED_SAMPLE_VIDEOS=false` to skip the gate if you need to deploy anyway.
