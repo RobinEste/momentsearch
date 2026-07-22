@@ -29,6 +29,9 @@ dist/
 # Benchmark
 benchmark/
 
+# Internal design notes (not published)
+MULTIMODAL_RETRIEVAL.md
+
 # OS / editor
 .DS_Store
 .idea/

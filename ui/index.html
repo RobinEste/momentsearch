@@ -58,8 +58,8 @@
     A Deep Dive into <span class="text-coral">LLMs</span>.
   </h1>
   <p id="heroSub" class="mt-4 text-[17px] text-muted leading-relaxed mx-auto max-w-lg">
-    Ask anything you can see on screen across these talks. MomentSearch reads the
-    picture — never the audio — and plays the exact moment beside its answer.
+    Ask anything shown or said across these talks. MomentSearch searches both the
+    picture and the transcript, and plays the exact moment beside its answer.
   </p>
 
   <!-- big centered search bar -->
@@ -98,7 +98,7 @@
     </div>
     <div id="videos" class="flex flex-wrap gap-2 mt-2"></div>
     <div id="scopeLine" class="hidden text-xs text-muted mt-3"></div>
-    <p id="libNote" class="text-xs text-muted mt-3">Looks only at the picture (frames), never audio. First ingest downloads the CLIP model.</p>
+    <p id="libNote" class="text-xs text-muted mt-3">YouTube is searched by picture (frames) and transcript; uploads by picture only for now. First ingest downloads the models.</p>
   </section>
 
   <!-- RESULTS -->
@@ -126,8 +126,8 @@
     <div class="flex items-center gap-3 px-4 py-3 border-t border-line">
       <img id="mFrame" class="w-28 aspect-video object-cover rounded-lg border border-line bg-paper2" alt="matched frame">
       <div class="text-xs text-muted">
-        <div class="font-semibold text-ink mb-0.5">Matched frame</div>
-        This is what CLIP matched your question against — the still it judged closest to what you asked.
+        <div id="mFrameLabel" class="font-semibold text-ink mb-0.5">Matched frame</div>
+        <span id="mFrameDesc">This is what CLIP matched your question against — the still it judged closest to what you asked.</span>
         <a id="mOut" href="#" target="_blank" class="text-coral2 font-semibold hover:text-coral block mt-1">Open on source ↗</a>
       </div>
     </div>
@@ -155,11 +155,11 @@ function applyMode(){
     $("#heroSub").textContent='Add a YouTube URL or upload a file. MomentSearch finds the exact moments — and plays each one right beside the answer.';
     $("#modeLink").textContent='← Back to the sample';     $("#modeLink").href='/';
     $("#libTitle").textContent='Your videos';
-    $("#libNote").innerHTML='Looks only at the picture (frames), never audio. Tip: unselect the samples to search only your own uploads.';
+    $("#libNote").innerHTML='YouTube videos are searched by <b>both</b> what\'s shown (frames) and what\'s said (transcript). Uploaded files are searched by picture only for now — no transcript yet. Tip: unselect the samples to search only your own uploads.';
   } else {
     $("#heroBadge").innerHTML='● Sample project · four LLM talks, pre-indexed';
     $("#heroTitle").innerHTML='A Deep Dive into <span class="text-coral">LLMs</span>.';
-    $("#heroSub").textContent='Ask anything about these four talks — MomentSearch finds the exact moment on screen and plays it right here. Visual only; it never reads the audio.';
+    $("#heroSub").textContent='Ask anything about these four talks — MomentSearch finds the exact moment from what\'s shown on screen and what\'s said, and plays it right here.';
     $("#modeLink").textContent='Want your own videos? Get started →';   $("#modeLink").href='/get-started';
     $("#libTitle").textContent='In this deep dive';
     $("#addTabs").classList.add("hidden");
@@ -365,20 +365,34 @@ $("#go").onclick=async()=>{
 };
 
 function renderSources(){
-  $("#sources").innerHTML=CITES.map(c=>`
+  $("#sources").innerHTML=CITES.map(c=>{
+    const mods=(c.modalities||[]);
+    const tags=mods.map(m=>m==="frame"
+      ? '<span class="text-[9px] px-1 rounded bg-coral/15 text-coral2">seen</span>'
+      : '<span class="text-[9px] px-1 rounded bg-[#cfe8d6] text-[#1f7a43]">said</span>').join(" ");
+    // Text-only moments have no frame; they're always YouTube, so fall back to
+    // the video's thumbnail instead of an empty "(no frame)" placeholder.
+    const yid = ytId(c);
+    const img = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
+    const thumb = img
+      ? `<img loading="lazy" src="${esc(img)}" class="w-full h-full object-cover" onerror="this.style.opacity=0">`
+      : `<div class="w-full h-full flex items-center justify-center text-muted text-xs p-2 text-center">transcript moment<br>(no frame)</div>`;
+    const quote = c.transcript
+      ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.transcript)}”</div>` : "";
+    return `
     <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral transition" data-n="${c.n}">
-      <div class="aspect-video bg-paper2 overflow-hidden">
-        <img loading="lazy" src="${esc(c.thumbnail)}" class="w-full h-full object-cover" onerror="this.style.opacity=0">
-      </div>
+      <div class="aspect-video bg-paper2 overflow-hidden">${thumb}</div>
       <div class="p-3">
         <div class="flex items-center gap-2 mb-1">
           <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
           <span class="text-[11px] text-muted">${esc(c.timestamp)}</span>
+          ${tags}
           <span class="text-[11px] text-muted ml-auto">score ${c.score}</span>
         </div>
         <div class="text-[12px] font-600 leading-snug line-clamp-2">${esc(c.title||c.video_id)}</div>
+        ${quote}
       </div>
-    </button>`).join("");
+    </button>`;}).join("");
   $("#sources").querySelectorAll(".source").forEach(el=>el.onclick=()=>playCitation(+el.dataset.n));
 }
 
@@ -389,9 +403,19 @@ function playCitation(n){
   const c=CITES.find(x=>x.n===n); if(!c)return;
   const secs=Math.floor((c.ms||0)/1000);
   $("#mTitle").textContent=c.title||c.video_id;
-  $("#mMeta").textContent=`Moment at ${c.timestamp} · similarity ${c.score}`;
-  $("#mFrame").src=c.thumbnail; $("#mOut").href=c.deeplink||"#";
+  $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${c.timestamp}`;
   const box=$("#playerBox"); const yid=ytId(c);
+  // Frame preview if we have one; otherwise (text-only YouTube moment) the
+  // video's thumbnail, so the modal never shows an empty preview.
+  const preview = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
+  $("#mFrame").style.display = preview ? "" : "none";
+  if(preview) $("#mFrame").src = preview;
+  const isFrame = !!c.thumbnail;
+  $("#mFrameLabel").textContent = isFrame ? "Matched frame" : "Matched on transcript";
+  $("#mFrameDesc").textContent = isFrame
+    ? "This is what CLIP matched your question against — the still it judged closest to what you asked."
+    : "This moment matched on what was said (transcript). Shown is the video’s thumbnail — press play to jump to the exact spot.";
+  $("#mOut").href=c.deeplink||"#";
   if(yid){
     box.innerHTML=`<iframe class="w-full h-full" src="https://www.youtube.com/embed/${yid}?start=${secs}&autoplay=1&rel=0"
       title="moment" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>`;

@@ -25,14 +25,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from . import config
 from .config import CLIP_MODEL
 from .rag import embeddings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    dim = embeddings.embedding_dim()  # load the model NOW, not on first request
+    dim = embeddings.embedding_dim()  # load CLIP NOW, not on first request
     print(f"[clip] {CLIP_MODEL} warm (dim {dim})")
+    if config.ENABLE_TRANSCRIPT:
+        embeddings.embed_docs_local(["warmup"])  # load the bge text model too
+        print(f"[clip] text model {config.TEXT_EMBED_MODEL} warm")
     yield
 
 
@@ -45,6 +49,10 @@ class ImagesRequest(BaseModel):
 
 class TextRequest(BaseModel):
     text: str
+
+
+class DocsRequest(BaseModel):
+    texts: list[str]
 
 
 @app.get("/healthz")
@@ -61,3 +69,15 @@ def embed_images(req: ImagesRequest):
 @app.post("/embed/text")
 def embed_text(req: TextRequest):
     return {"vector": embeddings.embed_text_local(req.text).tolist()}
+
+
+# ── Transcript branch (bge semantic text) ────────────────────────────────────
+
+@app.post("/embed/docs")
+def embed_docs(req: DocsRequest):
+    return {"vectors": embeddings.embed_docs_local(req.texts).tolist()}
+
+
+@app.post("/embed/query")
+def embed_query(req: TextRequest):
+    return {"vector": embeddings.embed_query_local(req.text).tolist()}

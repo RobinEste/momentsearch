@@ -69,11 +69,11 @@ def from_row(row: dict) -> LLMConfig:
                      max_tokens=config.LLM_MAX_TOKENS)
 
 
-def _prompt(question: str, n: int) -> str:
+def _intro(question: str, n: int) -> str:
     return (
         f"Question: {question}\n\n"
-        f"You are given {n} frames, numbered 1 to {n} in order. "
-        "Answer the question from what is visible, citing frames as [n]."
+        f"You are given {n} moments, numbered 1 to {n}, each with a frame and/or "
+        "a transcript excerpt. Answer from them, citing moments as [n]."
     )
 
 
@@ -90,12 +90,14 @@ def _downscale(jpeg: bytes) -> bytes:
     return buf.getvalue()
 
 
-def answer(question: str, frames: list[bytes], cfg: LLMConfig) -> str:
-    """Synthesize a cited answer from retrieved frame JPEGs with `cfg`'s model."""
-    frames = [_downscale(f) for f in frames]
+def answer(question: str, moments: list[dict], cfg: LLMConfig) -> str:
+    """Synthesize a cited answer from retrieved moments with `cfg`'s model.
+
+    moments: [{"image": bytes|None, "transcript": str|None, "timestamp": str}]
+    — each may carry a frame, a transcript excerpt, or both."""
     if cfg.provider == "anthropic":
-        return _answer_anthropic(cfg, question, frames)
-    return _answer_openai(cfg, question, frames)
+        return _answer_anthropic(cfg, question, moments)
+    return _answer_openai(cfg, question, moments)
 
 
 def ping(cfg: LLMConfig) -> str:
@@ -105,8 +107,8 @@ def ping(cfg: LLMConfig) -> str:
 
     buf = io.BytesIO()
     Image.new("RGB", (32, 32), (220, 40, 40)).save(buf, format="JPEG")
-    return answer("Reply with the dominant color of frame 1, one word.",
-                  [buf.getvalue()], cfg)
+    return answer("Reply with the dominant color of moment 1, one word.",
+                  [{"image": buf.getvalue(), "transcript": None, "timestamp": "00:00"}], cfg)
 
 
 def _base_url(cfg: LLMConfig) -> str | None:
@@ -117,14 +119,25 @@ def _base_url(cfg: LLMConfig) -> str | None:
     return None
 
 
-def _answer_openai(cfg: LLMConfig, question: str, frames: list[bytes]) -> str:
+def _label(i: int, m: dict) -> str:
+    line = f"[{i}] @ {m.get('timestamp', '')}"
+    if m.get("transcript"):
+        line += f' transcript: "{m["transcript"]}"'
+    if m.get("image") is None:
+        line += " (transcript only, no frame)"
+    return line
+
+
+def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict]) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=cfg.api_key or "not-needed", base_url=_base_url(cfg))
-    content: list[dict] = [{"type": "text", "text": _prompt(question, len(frames))}]
-    for f in frames:
-        uri = f"data:image/jpeg;base64,{base64.b64encode(f).decode()}"
-        content.append({"type": "image_url", "image_url": {"url": uri}})
+    content: list[dict] = [{"type": "text", "text": _intro(question, len(moments))}]
+    for i, m in enumerate(moments, 1):
+        content.append({"type": "text", "text": _label(i, m)})
+        if m.get("image"):
+            uri = f"data:image/jpeg;base64,{base64.b64encode(_downscale(m['image'])).decode()}"
+            content.append({"type": "image_url", "image_url": {"url": uri}})
     resp = client.chat.completions.create(
         model=cfg.model,
         messages=[{"role": "system", "content": SYSTEM},
@@ -135,16 +148,17 @@ def _answer_openai(cfg: LLMConfig, question: str, frames: list[bytes]) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-def _answer_anthropic(cfg: LLMConfig, question: str, frames: list[bytes]) -> str:
+def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict]) -> str:
     import anthropic
 
-    client = anthropic.Anthropic(api_key=cfg.api_key,
-                                 base_url=cfg.base_url or None)
-    blocks: list[dict] = [{"type": "text", "text": _prompt(question, len(frames))}]
-    for f in frames:
-        blocks.append({"type": "image", "source": {
-            "type": "base64", "media_type": "image/jpeg",
-            "data": base64.b64encode(f).decode()}})
+    client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    blocks: list[dict] = [{"type": "text", "text": _intro(question, len(moments))}]
+    for i, m in enumerate(moments, 1):
+        blocks.append({"type": "text", "text": _label(i, m)})
+        if m.get("image"):
+            blocks.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.b64encode(_downscale(m["image"])).decode()}})
     resp = client.messages.create(
         model=cfg.model,
         max_tokens=cfg.max_tokens,

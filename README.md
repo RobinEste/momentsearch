@@ -1,6 +1,6 @@
 # MomentSearch
 
-**Ask questions about your videos and get answers grounded in the exact moments — by what's _seen_ on screen.**
+**Ask questions about your videos and get answers grounded in the exact moments — by what's _seen_ on screen, and (for YouTube) what's _said_ in the transcript.**
 
 🌐 **Live app:** [momentsearch.fly.dev](https://momentsearch.fly.dev/get-started)
 
@@ -12,10 +12,12 @@ relevant moments and (optionally) has **your own vision LLM** read those
 frames and write a cited answer — or honestly abstain when the evidence isn't
 there.
 
-> **Visual, not audio.** MomentSearch understands the *picture* — it never
-> transcribes speech. That means it works on silent footage, screen recordings,
-> sports, surveillance, b-roll, slides, demos, and anything where what you're
-> looking for is something you can *see*.
+> **Visual-first, multimodal for YouTube.** The core is *visual* — CLIP over
+> sampled frames, so it works on silent footage, screen recordings, sports,
+> b-roll, slides, demos: anything you can *see*. For **YouTube** it adds a
+> **transcript** branch (captions) and fuses the two, so "find where they *talk
+> about* X" works too. **Uploaded files are visual-only for now** — no audio
+> transcription yet (that'd need Whisper).
 
 - 🎥 **Presigned uploads** — the browser PUTs straight to object storage; gigabytes never flow through the API
 - ⚙️ **Queue + stateless workers** — the API answers `202` instantly; Prefect-orchestrated workers do the heavy lifting
@@ -24,6 +26,7 @@ there.
 - 🛡️ **Confidence gate** — below-threshold retrievals abstain *before* the LLM is ever called
 - 💬 **Cited answers** — bring your own vision LLM (OpenAI-compatible, NVIDIA, or Anthropic)
 - 🏠 **Per-user models** — each tenant can plug in a model *they* host (vLLM, Ollama, any OpenAI-compatible endpoint) and their answers run on it
+- 🧩 **Multimodal fusion** — for YouTube, a transcript branch runs alongside the visual one and a **rank-based scoring module** (RRF + time-windows + cross-modal boost) fuses them; "find where they *talk about* X" works even when the screen doesn't show it
 - 🔓 **Apache 2.0**
 
 ## Architecture
@@ -36,29 +39,48 @@ Postgres — "nothing on local."
 Two paths that scale in opposite directions and never share a request:
 
 ```
-WRITE PATH (slow, background)                       READ PATH (fast, ms retrieval)
-                                                    
- browser ──1. POST /api/videos/presign──► API        question ──► POST /api/ask
- browser ──2. PUT video───► Object storage                │
- browser ──3. POST /api/videos (register)─► API           ▼
-                │ insert row (pending)                CLIP text embed ──► clip service
-                │ schedule flow run                        │
-                ▼                    ▼                     ▼
-          Neon Postgres      Prefect Cloud           Qdrant kNN (user_id-filtered,
-          (manifest,         (queue, retries,        int8-quantized, rescored)
-           status, hashes)    run dashboard)               │
-                                   │ polls (HTTPS)         ▼
-                                   ▼                  temporal dedup → top-k frames
-                          Worker (src/worker.py)           │
-   fetch → sample (ffmpeg→memory) → pHash dedup       Gate 1: score < threshold?
-   → thumbnails → embed batches ──► CLIP service      └─ yes → abstain, no LLM call
-   → Qdrant   (seed gate indexes the 4 talks first)        │ no
-                                                           ▼
-   pending → fetching → sampling → embedding         vision LLM reads the frames →
-          → indexed | skipped | failed               cited answer ([n] validated)
+WRITE PATH — slow, background (API answers 202 instantly; workers do the work)
 
-           CLIP service (src/clip_service.py) — ONE warm model behind a URL:
-           api + workers send batches to CLIP_SERVICE_URL; scale/GPU it alone
+ browser ─1. POST /api/videos/presign─► API            ┌───────────────┐
+ browser ─2. PUT video ───────► Object storage         │ Neon Postgres │ manifest, status, hashes
+ browser ─3. POST /api/videos (register) ─► API ───────┤ Prefect Cloud │ queue, retries, dashboard
+                │ insert 'pending' row                  └───────────────┘
+                ▼
+     WFQ dispatcher — fair, round-robin across users (src/dispatcher.py)
+                │ admit up to DISPATCH_MAX_INFLIGHT
+                ▼
+     Worker (src/worker.py), WORKER_CONCURRENCY runs per machine:
+        fetch (yt-dlp | bucket) → sample (ffmpeg→memory) → pHash dedup
+          → embed frames ──────► CLIP service ──► Qdrant 'moments'       (visual)
+          → transcript (YouTube captions → bge) ──► Qdrant 'moments_text'  (text)
+        pending → fetching → sampling → embedding → indexed | skipped | failed
+
+     CLIP service (src/clip_service.py) — ONE warm model behind CLIP_SERVICE_URL;
+     api + workers send batches to it; scale it up / onto a GPU on its own.
+
+
+READ PATH — fast (retrieval is ~ms; the multimodal LLM call dominates cost)
+
+ question ──► POST /api/ask
+      │   query BOTH branches in parallel, always — no router
+      ├─ visual branch  CLIP text-embed ─► Qdrant kNN 'moments'       ┐ user_id-filtered,
+      └─ text branch    bge query-embed ─► Qdrant kNN 'moments_text'  ┘ int8, rescored
+                                   │           (text branch: YouTube only)
+                                   ▼
+   ┌──────────── SCORING MODULE — src/rag/search.py :: _fuse ──────────────┐
+   │  1. RRF          rank each branch on its own; score = 1/(RRF_K+rank)   │
+   │  2. time-window  group hits within FUSION_WINDOW_S s (same video) →    │
+   │                  one 'moment'; sum their RRF                           │
+   │  3. cross-modal  ×CROSS_MODAL_BOOST when a frame AND a transcript      │
+   │                  chunk agree at the same instant (strongest signal)    │
+   └───────────────────────────────┬───────────────────────────────────────┘
+                                   ▼  top-TOP_K fused moments
+                 Gate 1 — both raw branch-bests below threshold?
+                   └─ yes → abstain, no LLM call ("couldn't find that")
+                                   │ no
+                                   ▼
+        vision LLM reads each moment's frame + transcript excerpt →
+        cited answer ([n] validated; every timestamp comes from a payload)
 ```
 
 The whole system is **one Docker image** with four entrypoints (the command
@@ -105,6 +127,10 @@ so every later `up` finds them indexed and starts in seconds. Set
 `SEED_SAMPLE_VIDEOS=false` to skip the gate; `python examples/quickstart.py`
 is the manual route (also runs sample queries in the terminal).
 
+> The gate is wired into `docker compose up` (via `depends_on`) and Fly (via
+> `release_command`) — use one of those. A bare `docker run` of the image only
+> starts uvicorn and **skips seeding**, so the samples won't be indexed.
+
 Bare processes instead of compose (each is `python -m` / uvicorn on the `src.`
 module — run in separate terminals):
 ```
@@ -136,9 +162,15 @@ python -m src.seed                        # one-shot: index the 4 samples
      neighbours **before** they cost CLIP compute; thumbnails batch-upload to
      `frames/{user}/{id}/NNNNNN.jpg`.
    - **embed + index** — batches of `CLIP_BATCH` frames go to the **warm CLIP
-     service** (no per-video model load), then upsert to Qdrant with
-     deterministic IDs (`uuid5(video_id:frame_idx)` — re-runs overwrite,
-     never duplicate), tagged `user_id`, `video_id`, `ms`, `embed_version`.
+     service** (no per-video model load), then upsert to the visual collection
+     (`moments`) with deterministic IDs (`uuid5(video_id:frame_idx)` — re-runs
+     overwrite, never duplicate), tagged `user_id`, `video_id`, `ms`,
+     `modality:frame`, `t_start`/`t_end`, `embed_version`.
+   - **transcript (YouTube only)** — captions → ~20s time-chunks → bge text
+     embeddings → the text collection (`moments_text`), tagged `modality:text`
+     with the same timestamps. **Best-effort:** uploads have no captions and some
+     videos have none — either way the video stays visual-only and the run never
+     fails. Runs *after* embed+index (whose delete clears both collections first).
 
 Poll `GET /api/videos` (or watch the UI chips) until `indexed`.
 
@@ -146,23 +178,39 @@ Poll `GET /api/videos` (or watch the UI chips) until `indexed`.
 
 `POST /api/ask {question, video_id?}`:
 
-1. **Retrieve** — CLIP text embedding (via the warm clip service) → Qdrant
-   HNSW filtered by `user_id`
-   (private *and* fast: the tenant index means a user's search touches only
-   their slice), quantization-rescored. Milliseconds.
-2. **Trim** — temporal dedup (two hits from the same video within 5s are one
-   moment) → `TOP_K` frames. This count is how many costly frames reach the LLM.
-3. **Gate 1 — confidence**: best score below `CONFIDENCE_THRESHOLD` → abstain
-   now ("I couldn't find that in your videos"), **no LLM call**. Kills most
-   hallucination risk for free.
-4. **Generate** — the few best frames, downscaled to `LLM_IMAGE_MAX_PX`, go to
-   the vision LLM: answer only from these frames, cite `[n]`, or say so.
-   Citations are validated; invented references are stripped.
-5. **Answer** — with clickable thumbnails + timestamps (presigned GETs straight
-   from the bucket), or the honest refusal.
+1. **Retrieve — both branches, in parallel, always** (no query router; routing
+   fails exactly on the ambiguous questions where you need help most):
+   - **visual** — CLIP text-embedding → Qdrant `moments`, filtered by `user_id`
+     (private *and* fast: the tenant index means a search touches only that
+     user's slice), quantization-rescored. Milliseconds.
+   - **text** — bge query-embedding → Qdrant `moments_text` (YouTube
+     transcripts). Skipped cleanly when `ENABLE_TRANSCRIPT=false` or nothing is
+     indexed yet.
+2. **Score — the fusion module** (`_fuse`, [src/rag/search.py](src/rag/search.py)).
+   The two branches' raw scores are incomparable (CLIP ~0.3 vs bge ~0.7), so we
+   never sort by raw score:
+   - **RRF** — rank each branch on its own, score by rank `1/(RRF_K + rank)`, so
+     a strong frame and a strong transcript hit compete fairly.
+   - **time-window** — bucket hits within `FUSION_WINDOW_S` seconds (same video)
+     into one *moment* and sum their RRF — the timestamp is the join key.
+   - **cross-modal boost** — a moment where **both** a frame and a transcript
+     chunk land at the same instant is ×`CROSS_MODAL_BOOST`: two independent
+     modalities agreeing is the strongest relevance signal available.
+   The top `TOP_K` fused moments go forward.
+3. **Gate 1 — confidence** on the *raw per-branch bests* (RRF scores are far too
+   small to threshold on): abstain only when **neither** what's on screen
+   (`CONFIDENCE_THRESHOLD`) **nor** what's said (`TEXT_CONFIDENCE_THRESHOLD`)
+   clears its bar — "I couldn't find that in your videos", **no LLM call**. Kills
+   most hallucination risk for free.
+4. **Generate** — each moment's frame (downscaled to `LLM_IMAGE_MAX_PX`) **and**
+   its transcript excerpt go to the vision LLM: answer only from these moments,
+   cite `[n]`, or say so. Citations are validated; invented references stripped.
+5. **Answer** — clickable thumbnails + timestamps (presigned GETs straight from
+   the bucket). Every timestamp is read from the winning hit's payload — the LLM
+   never invents one — or the honest refusal.
 
 The cost fact that drives this shape: retrieval is ~10-30ms; the multimodal
-LLM call is seconds and dominates cost. Optimize there — few frames,
+LLM call is seconds and dominates cost. Optimize there — few moments,
 downscaled, gated — not the vector store.
 
 ## Bring your own model (per user)
@@ -280,7 +328,9 @@ WFQ:   A▓ B▓ A▓ B▓ A▓ B▓ …            ← interleaved; B is served
 
 **Later, under real load** (design room exists, not built): per-tenant *quotas*
 and weights (the dispatcher's round-robin extends to weighted shares),
-backpressure on queue depth, Redis query cache, OCR/transcript hybrid search.
+backpressure on queue depth, Redis query cache, a cross-encoder reranker over
+the fused moments, and OCR / on-screen-text as a third branch (transcript hybrid
+search already ships — see the read path above).
 
 ## Deploy (Fly.io)
 
@@ -389,15 +439,17 @@ the four entrypoints as top-level modules in the package.
     ├── api/
     │   ├── videos.py        write path: presign, register, status, retry, delete
     │   └── search.py        read path: /api/ask, /api/llm, config, media, UI
+    ├── dispatcher.py        WFQ: fair round-robin admission of pending videos
     ├── ingest/
     │   ├── fetch.py         source acquisition (bucket download | yt-dlp) + sha256
     │   ├── frames.py        ffmpeg pipe-to-memory sampling (interval | scene)
     │   ├── dedup.py         perceptual-hash dedup (before CLIP spends compute)
-    │   └── pipeline.py      the Prefect flow: fetch → sample → embed/index
+    │   ├── transcript.py    YouTube captions → time-chunks (the text branch)
+    │   └── pipeline.py      the Prefect flow: fetch → sample → embed/index → transcript
     └── rag/
-        ├── embeddings.py    CLIP image+text — in-process or remote (CLIP_SERVICE_URL)
-        ├── vector_store.py  multi-tenant Qdrant: tenant index, int8/on-disk, UUID5 ids
-        └── search.py        retrieve → temporal dedup → confidence gate → cited answer
+        ├── embeddings.py    CLIP image+text + bge transcript — in-process or remote
+        ├── vector_store.py  multi-tenant Qdrant: visual + text collections, int8/on-disk
+        └── search.py        2-branch retrieve → RRF fusion/scoring → gate → cited answer
 ```
 
 ## Security notes (presigned uploads)

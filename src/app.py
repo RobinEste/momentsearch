@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import db
+from . import config, db
 from .api.search import router as search_router
 from .api.videos import router as videos_router
 from .rag import vector_store
@@ -33,7 +33,9 @@ async def lifespan(app: FastAPI):
     # loading the model) so a question before the first ingest returns
     # "no moments" instead of a 500. Qdrant being down must not block boot.
     try:
-        vector_store.ensure_collection()
+        vector_store.ensure_collection()          # visual (CLIP frames)
+        if config.ENABLE_TRANSCRIPT:
+            vector_store.ensure_text_collection()  # transcript (bge text)
     except Exception as exc:
         print(f"[startup] Qdrant not ready ({exc!r}) — search degrades to empty results")
     yield

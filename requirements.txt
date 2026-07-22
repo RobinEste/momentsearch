@@ -19,6 +19,9 @@ sentence-transformers>=2.7
 pillow>=10.0
 numpy>=1.24
 
+# Transcript (text) branch — bge semantic embeddings, ONNX (no torch), tiny
+fastembed>=0.3
+
 # Video acquisition (YouTube path). Keep this CURRENT — YouTube changes its
 # bot-detection constantly and old yt-dlp versions stop working first.
 yt-dlp>=2026.7.4

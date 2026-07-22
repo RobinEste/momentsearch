@@ -35,6 +35,8 @@ from ..config import (
     QDRANT_ON_DISK,
     QDRANT_QUANTIZATION,
     QDRANT_URL,
+    TEXT_COLLECTION,
+    TEXT_EMBED_DIM,
 )
 
 _client: QdrantClient | None = None
@@ -86,13 +88,14 @@ def _user_filter(user_id: str, video_id: str | None = None,
     return qm.Filter(must=must)
 
 
-def ensure_collection() -> None:
+def _ensure(collection: str, dim: int) -> None:
+    """Create a collection (low-RAM profile) + tenant/video payload indexes."""
     c = client()
-    if not c.collection_exists(QDRANT_COLLECTION):
+    if not c.collection_exists(collection):
         c.create_collection(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             vectors_config=qm.VectorParams(
-                size=_dim(),
+                size=dim,
                 distance=qm.Distance.COSINE,
                 on_disk=QDRANT_ON_DISK,
             ),
@@ -107,22 +110,30 @@ def ensure_collection() -> None:
     # searches touch a small slice of the index. video_id for delete/filter.
     try:
         c.create_payload_index(
-            collection_name=QDRANT_COLLECTION, field_name="user_id",
+            collection_name=collection, field_name="user_id",
             field_schema=qm.KeywordIndexParams(type=qm.KeywordIndexType.KEYWORD,
                                                is_tenant=True))
     except Exception:  # older server without is_tenant, or index already exists
         try:
-            c.create_payload_index(collection_name=QDRANT_COLLECTION,
-                                   field_name="user_id",
+            c.create_payload_index(collection_name=collection, field_name="user_id",
                                    field_schema=qm.PayloadSchemaType.KEYWORD)
         except Exception:
             pass
     try:
-        c.create_payload_index(collection_name=QDRANT_COLLECTION,
-                               field_name="video_id",
+        c.create_payload_index(collection_name=collection, field_name="video_id",
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+
+
+def ensure_collection() -> None:
+    """Visual (CLIP frame) collection."""
+    _ensure(QDRANT_COLLECTION, _dim())
+
+
+def ensure_text_collection() -> None:
+    """Transcript (bge text) collection — the second branch."""
+    _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM)
 
 
 def upsert_frames(user_id: str, video_id: str, ids: Iterable[int],
@@ -161,12 +172,51 @@ def search(vector: np.ndarray, user_id: str, *, top_k: int,
     return [{"score": float(h.score), **(h.payload or {})} for h in hits]
 
 
+# ── Transcript (text) branch ─────────────────────────────────────────────────
+
+def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
+                  payloads: list[dict[str, Any]]) -> None:
+    """Transcript chunks into the text collection. IDs are uuid5 of
+    '<video_id>:text:<i>' so re-runs overwrite, and never collide with frame ids."""
+    points = [
+        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:text:{i}")),
+                       vector=vec.tolist(), payload=payload)
+        for i, (vec, payload) in enumerate(zip(vectors, payloads))
+    ]
+    if points:
+        client().upsert(collection_name=TEXT_COLLECTION, points=points, wait=True)
+
+
+def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
+                video_id: str | None = None,
+                video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    try:
+        hits = client().query_points(
+            collection_name=TEXT_COLLECTION,
+            query=vector.tolist(),
+            limit=top_k,
+            query_filter=_user_filter(user_id, video_id, video_ids),
+            with_payload=True,
+            search_params=qm.SearchParams(
+                quantization=qm.QuantizationSearchParams(rescore=True)
+                if QDRANT_QUANTIZATION else None,
+            ),
+        ).points
+    except Exception as exc:
+        if "doesn't exist" in str(exc) or "Not found" in str(exc):
+            return []
+        raise
+    return [{"score": float(h.score), **(h.payload or {})} for h in hits]
+
+
 def delete_video(user_id: str, video_id: str) -> None:
-    client().delete(
-        collection_name=QDRANT_COLLECTION,
-        points_selector=qm.FilterSelector(filter=_user_filter(user_id, video_id)),
-        wait=True,
-    )
+    """Purge a video from BOTH branches (frames + transcript)."""
+    sel = qm.FilterSelector(filter=_user_filter(user_id, video_id))
+    for coll in (QDRANT_COLLECTION, TEXT_COLLECTION):
+        try:
+            client().delete(collection_name=coll, points_selector=sel, wait=True)
+        except Exception:
+            pass  # text collection may not exist if transcript is disabled
 
 
 def collection_ready() -> bool:

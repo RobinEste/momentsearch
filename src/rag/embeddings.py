@@ -78,6 +78,34 @@ def embed_text_local(text: str) -> np.ndarray:
     return _normalize(np.asarray(vec, dtype=np.float32))[0]
 
 
+# ── Semantic text embeddings (bge via fastembed) — the TRANSCRIPT branch ──────
+# CLIP's text encoder is tuned to match *images*, not to compare text-to-text.
+# So the transcript branch uses a proper small text model (bge), a separate,
+# lightweight (onnx, no torch) space from the CLIP vectors.
+
+@lru_cache
+def _text_model():
+    from fastembed import TextEmbedding
+
+    return TextEmbedding(config.TEXT_EMBED_MODEL)
+
+
+def embed_docs_local(texts: list[str]) -> np.ndarray:
+    """Embed transcript chunks (documents) — bge, L2-normalized already."""
+    if not texts:
+        return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
+    with _lock:
+        vecs = list(_text_model().embed(texts))
+    return np.asarray(vecs, dtype=np.float32)
+
+
+def embed_query_local(text: str) -> np.ndarray:
+    """Embed a search query for the transcript branch (bge query prompt)."""
+    with _lock:
+        vec = next(iter(_text_model().query_embed([text])))
+    return np.asarray(vec, dtype=np.float32)
+
+
 # ── Remote inference (CLIP_SERVICE_URL set) ──────────────────────────────────
 
 def _post(path: str, payload: dict, timeout: int = 600) -> dict:
@@ -118,3 +146,21 @@ def embed_text(text: str) -> np.ndarray:
         vec = _post("/embed/text", {"text": text}, timeout=60)["vector"]
         return np.asarray(vec, dtype=np.float32)
     return embed_text_local(text)
+
+
+def embed_docs(texts: list[str]) -> np.ndarray:
+    """Transcript chunks -> bge vectors (remote clip service, or local)."""
+    if config.CLIP_SERVICE_URL:
+        if not texts:
+            return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
+        vecs = _post("/embed/docs", {"texts": texts})["vectors"]
+        return np.asarray(vecs, dtype=np.float32)
+    return embed_docs_local(texts)
+
+
+def embed_query(text: str) -> np.ndarray:
+    """Search query -> bge vector for the transcript branch (remote, or local)."""
+    if config.CLIP_SERVICE_URL:
+        vec = _post("/embed/query", {"text": text}, timeout=60)["vector"]
+        return np.asarray(vec, dtype=np.float32)
+    return embed_query_local(text)

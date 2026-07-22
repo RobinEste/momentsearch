@@ -159,6 +159,36 @@ CLIP_SERVICE_URL = os.getenv("CLIP_SERVICE_URL", "").strip().rstrip("/")
 CLIP_DIM = _int("CLIP_DIM", 0)
 EMBED_VERSION = os.getenv("EMBED_VERSION", f"{CLIP_MODEL}-v1")
 
+# --- Multimodal: transcript (text) branch (Path 1) -----------------------------
+# The visual branch is CLIP frames (above). This adds a SECOND branch: YouTube
+# captions, chunked by time, embedded with a small semantic text model (bge via
+# fastembed — CPU, free), in a separate Qdrant collection. At query time both
+# branches run and fuse by RANK (RRF) — CLIP scores (~0.3) and text scores
+# (~0.7) live on different scales, so raw-score comparison is meaningless.
+# Uploaded files have no captions, so this is YouTube-only; a video with no
+# captions just indexes visually (the branch is skipped, never fatal).
+ENABLE_TRANSCRIPT = _envbool("ENABLE_TRANSCRIPT", True)
+TEXT_COLLECTION = os.getenv("TEXT_COLLECTION", "moments_text")
+TEXT_EMBED_MODEL = os.getenv("TEXT_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+TEXT_EMBED_DIM = _int("TEXT_EMBED_DIM", 384)   # bge-small-en-v1.5 = 384
+TEXT_EMBED_VERSION = os.getenv("TEXT_EMBED_VERSION", f"{TEXT_EMBED_MODEL}-v1")
+# Transcript chunking: group caption cues into ~CHUNK_SECONDS windows so a chunk
+# is a coherent spoken passage with a real t_start/t_end, not one tiny cue.
+TRANSCRIPT_CHUNK_SECONDS = _float("TRANSCRIPT_CHUNK_SECONDS", 20.0)
+TRANSCRIPT_LANGS = [c.strip() for c in
+                    os.getenv("TRANSCRIPT_LANGS", "en,en-US,en-GB").split(",") if c.strip()]
+
+# --- Fusion (multimodal retrieval) ---------------------------------------------
+# RRF: rank-based fusion across branches (score-agnostic). rrf = 1/(K + rank).
+RRF_K = _int("RRF_K", 60)
+# Hits from either branch within this many seconds are the SAME moment.
+FUSION_WINDOW_S = _float("FUSION_WINDOW_S", 15.0)
+# When a window has BOTH a frame and a transcript hit, multiply its score —
+# two independent modalities agreeing is the strongest relevance signal.
+CROSS_MODAL_BOOST = _float("CROSS_MODAL_BOOST", 1.5)
+# Per-branch candidates fetched before fusion.
+BRANCH_TOP_K = _int("BRANCH_TOP_K", 20)
+
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to
 # confirm you're not a bot". Mitigations, in order of reliability:
@@ -224,9 +254,12 @@ QDRANT_HNSW_ON_DISK = _envbool("QDRANT_HNSW_ON_DISK", True)
 # --- Retrieval / faithfulness ------------------------------------------------------
 TOP_K = _int("TOP_K", 6)                 # frames fed to the multimodal LLM (3-8)
 KNN_K = _int("KNN_K", 24)                # candidates fetched before trimming to TOP_K
-# Gate 1: if the best cosine score is below this, abstain WITHOUT calling the
-# LLM. CLIP text->image cosines run low (~0.2-0.35 for real matches); 0 disables.
-CONFIDENCE_THRESHOLD = _float("CONFIDENCE_THRESHOLD", 0.2)
+# Gate 1: abstain WITHOUT calling the LLM if BOTH branches' best raw score is
+# below their threshold. Fusion scores are RRF (tiny), so the gate uses each
+# branch's own raw cosine. CLIP text->image cosines run low (~0.2-0.35); bge
+# text-text cosines run higher (~0.5-0.7 for real matches). 0 disables.
+CONFIDENCE_THRESHOLD = _float("CONFIDENCE_THRESHOLD", 0.2)              # visual (CLIP)
+TEXT_CONFIDENCE_THRESHOLD = _float("TEXT_CONFIDENCE_THRESHOLD", 0.35)  # transcript (bge)
 
 # --- Multimodal LLM (answer synthesis only — retrieval works without it) -----------
 # LLM_PROVIDER: openai | nvidia | anthropic ("openai" also covers any

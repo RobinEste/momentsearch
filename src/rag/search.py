@@ -13,16 +13,14 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import db, llm, storage
-from ..config import CONFIDENCE_THRESHOLD, KNN_K, TOP_K
+from .. import config, db, llm, storage
+from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
+                      FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
-from .embeddings import embed_text
-
-# Two hits from the same video within this window are the same moment.
-_NEAR_MS = 5000
+from .embeddings import embed_query, embed_text
 
 ABSTAIN = ("I couldn't find that in your videos — nothing indexed looks "
-           "visually related to the question.")
+           "related to the question (neither what's on screen nor what's said).")
 
 
 def _seconds(ms: int) -> str:
@@ -30,16 +28,41 @@ def _seconds(ms: int) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def _dedupe_moments(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the best-scoring hit per (video, ~timestamp) — the cheap 'rerank'
-    that decides which few frames are worth multimodal-LLM money."""
-    kept: list[dict[str, Any]] = []
-    for h in hits:  # hits arrive score-descending
-        dup = any(k["video_id"] == h["video_id"] and abs(k["ms"] - h["ms"]) < _NEAR_MS
-                  for k in kept)
-        if not dup:
-            kept.append(h)
-    return kept
+def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
+    """Reciprocal-Rank-Fusion of the two branches into time windows.
+
+    Raw scores are incomparable (CLIP ~0.3 vs bge ~0.7), so we rank each branch
+    on its own and score by rank: rrf = 1/(RRF_K + rank). Then we bucket hits
+    within FUSION_WINDOW_S seconds of each other (same video) into one 'moment',
+    sum their rrf, and boost windows where BOTH modalities agree — two
+    independent signals pointing at the same instant is the strongest evidence.
+    """
+    def ranked(hits, modality):
+        out = []
+        for rank, h in enumerate(hits):
+            t = float(h.get("t_start", h.get("ms", 0) / 1000.0))
+            out.append({**h, "modality": modality, "rrf": 1.0 / (RRF_K + rank), "t": t})
+        return out
+
+    windows: list[dict] = []
+    for h in sorted(ranked(visual_hits, "frame") + ranked(text_hits, "text"),
+                    key=lambda x: x["rrf"], reverse=True):
+        w = next((w for w in windows if w["video_id"] == h["video_id"]
+                  and abs(w["t"] - h["t"]) <= FUSION_WINDOW_S), None)
+        if w is None:
+            w = {"video_id": h["video_id"], "t": h["t"], "rrf": 0.0,
+                 "modalities": set(), "frame": None, "text": None}
+            windows.append(w)
+        w["rrf"] += h["rrf"]
+        w["modalities"].add(h["modality"])
+        slot = "frame" if h["modality"] == "frame" else "text"
+        if w[slot] is None or h["rrf"] > w[slot]["rrf"]:
+            w[slot] = h
+    for w in windows:
+        if {"frame", "text"} <= w["modalities"]:
+            w["rrf"] *= CROSS_MODAL_BOOST
+    windows.sort(key=lambda w: w["rrf"], reverse=True)
+    return windows
 
 
 def _deeplink(video: dict | None, video_id: str, ms: int) -> str:
@@ -70,23 +93,40 @@ def _media_url(video: dict | None, user_id: str, video_id: str) -> str | None:
 
 def retrieve(question: str, user_id: str, *, top_k: int | None = None,
              video_id: str | None = None,
-             video_ids: list[str] | None = None) -> list[dict[str, Any]]:
-    """Top moments for a question, as numbered citations (metadata from Postgres).
+             video_ids: list[str] | None = None) -> dict[str, Any]:
+    """Multimodal retrieve: query BOTH branches (CLIP frames + transcript text),
+    fuse by RRF into time windows, and return numbered moment-citations.
 
-    video_ids scopes the search to a chosen subset (the UI's select/unselect) —
-    e.g. unselect the samples to query only your own uploads."""
+    Returns {citations, best_visual, best_text} — the two raw bests feed the
+    confidence gate (RRF scores are too small to threshold on). video_ids scopes
+    the search to chosen videos (UI select/unselect)."""
     k = top_k or TOP_K
-    qvec = embed_text(question)
-    hits = vector_store.search(qvec, user_id, top_k=max(KNN_K, k),
-                               video_id=video_id, video_ids=video_ids)
-    hits = _dedupe_moments(hits)[:k]
-    videos = db.videos_by_ids(sorted({h["video_id"] for h in hits}))
+
+    # Visual branch — CLIP text→image.
+    vhits = vector_store.search(embed_text(question), user_id, top_k=BRANCH_TOP_K,
+                                video_id=video_id, video_ids=video_ids)
+    best_visual = vhits[0]["score"] if vhits else 0.0
+
+    # Text branch — bge query→transcript-chunk (only if transcript is enabled).
+    thits: list[dict] = []
+    best_text = 0.0
+    if config.ENABLE_TRANSCRIPT:
+        thits = vector_store.search_text(embed_query(question), user_id,
+                                         top_k=BRANCH_TOP_K, video_id=video_id,
+                                         video_ids=video_ids)
+        best_text = thits[0]["score"] if thits else 0.0
+
+    windows = _fuse(vhits, thits)[:k]
+    videos = db.videos_by_ids(sorted({w["video_id"] for w in windows}))
     citations = []
-    for i, h in enumerate(hits, 1):
-        vid = h["video_id"]
+    for i, w in enumerate(windows, 1):
+        vid = w["video_id"]
         meta = videos.get(vid)
-        ms = int(h.get("ms", 0))
-        idx = int(h.get("idx", 0))
+        fr, tx = w["frame"], w["text"]
+        # Anchor on the frame's exact timestamp when there is one (precise visual
+        # seek); otherwise the transcript chunk's start.
+        ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
+        idx = int(fr["idx"]) if fr else None
         citations.append({
             "n": i,
             "video_id": vid,
@@ -96,12 +136,14 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
             "ms": ms,
             "timestamp": _seconds(ms),
             "idx": idx,
-            "thumbnail": _thumb_url(user_id, vid, idx),
+            "thumbnail": _thumb_url(user_id, vid, idx) if idx is not None else None,
             "media_url": _media_url(meta, user_id, vid),
             "deeplink": _deeplink(meta, vid, ms),
-            "score": round(h.get("score", 0.0), 4),
+            "score": round(w["rrf"], 4),
+            "transcript": (tx or {}).get("text"),
+            "modalities": sorted(w["modalities"]),
         })
-    return citations
+    return {"citations": citations, "best_visual": best_visual, "best_text": best_text}
 
 
 def _fallback_answer(citations: list[dict[str, Any]]) -> str:
@@ -128,10 +170,21 @@ def _validate_citations(answer: str, n_frames: int) -> str:
     return _CITE_RE.sub(fix, answer)
 
 
-def _fetch_frames(user_id: str, citations: list[dict[str, Any]]) -> list[bytes]:
-    keys = [storage.frame_key(user_id, c["video_id"], c["idx"]) for c in citations]
+def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
+    """Turn citations into what the LLM sees: each moment carries its frame
+    image (if any) and/or its transcript excerpt (if any), numbered to match."""
+    def frame_bytes(c):
+        if c.get("idx") is None:
+            return None
+        try:
+            return storage.get_bytes(storage.frame_key(user_id, c["video_id"], c["idx"]))
+        except Exception:
+            return None
+
     with ThreadPoolExecutor(max_workers=6) as ex:
-        return list(ex.map(storage.get_bytes, keys))
+        images = list(ex.map(frame_bytes, citations))
+    return [{"image": img, "transcript": c.get("transcript"),
+             "timestamp": c["timestamp"]} for img, c in zip(images, citations)]
 
 
 def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:
@@ -149,8 +202,8 @@ def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:
 def ask(question: str, user_id: str, *, top_k: int | None = None,
         video_id: str | None = None,
         video_ids: list[str] | None = None) -> dict[str, Any]:
-    citations = retrieve(question, user_id, top_k=top_k, video_id=video_id,
-                         video_ids=video_ids)
+    r = retrieve(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
+    citations = r["citations"]
     result: dict[str, Any] = {"question": question, "citations": citations}
 
     if not citations:
@@ -158,24 +211,25 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
                       llm_used=False, abstained=True)
         return result
 
-    # Gate 1 — retrieval confidence. Below threshold, no LLM call at all.
-    if CONFIDENCE_THRESHOLD and citations[0]["score"] < CONFIDENCE_THRESHOLD:
+    # Gate 1 — confidence on the RAW per-branch bests (not the RRF score).
+    # Abstain only if NEITHER what's on screen nor what's said looks relevant.
+    visual_ok = r["best_visual"] >= CONFIDENCE_THRESHOLD
+    text_ok = r["best_text"] >= TEXT_CONFIDENCE_THRESHOLD
+    if CONFIDENCE_THRESHOLD and not visual_ok and not text_ok:
         result.update(answer=ABSTAIN, llm_used=False, abstained=True)
         return result
 
     cfg, source = resolve_llm(user_id)
     if cfg is None:
-        # CLIP is an embedding model — it can't write prose — so instead of
-        # inventing an answer we summarize the best matches by similarity.
+        # No generative model — summarize the best matches instead of inventing.
         result.update(answer=_fallback_answer(citations), llm_used=False,
-                      note=("Visual-similarity results only. Connect your own "
-                            "model (vLLM/Ollama/API) in settings, or set "
-                            "LLM_API_KEY on the server, for a synthesized, "
-                            "frame-grounded answer."))
+                      note=("Retrieval-only results. Connect your own model "
+                            "(vLLM/Ollama/API) in settings, or set LLM_API_KEY "
+                            "on the server, for a synthesized, grounded answer."))
         return result
 
-    frames = _fetch_frames(user_id, citations)
-    result["answer"] = _validate_citations(llm.answer(question, frames, cfg),
+    moments = _build_moments(user_id, citations)
+    result["answer"] = _validate_citations(llm.answer(question, moments, cfg),
                                            len(citations))
     result["llm_used"] = True
     result["llm_source"] = source          # "user" = their own hosted model

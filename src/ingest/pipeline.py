@@ -108,7 +108,9 @@ def t_embed_index(video_id: str, user_id: str, frames: list[Frame]) -> int:
             ids=range(start, start + len(batch)),
             vectors=vectors,
             payloads=[{"user_id": user_id, "video_id": video_id, "ms": f.ms,
-                       "idx": start + i, "embed_version": EMBED_VERSION}
+                       "idx": start + i, "modality": "frame",
+                       "t_start": f.ms / 1000.0, "t_end": f.ms / 1000.0,
+                       "embed_version": EMBED_VERSION}
                       for i, f in enumerate(batch)],
         )
         total += len(batch)
@@ -116,6 +118,40 @@ def t_embed_index(video_id: str, user_id: str, frames: list[Frame]) -> int:
     db.set_status(video_id, "indexed", frame_count=total,
                   embed_version=EMBED_VERSION, progress=1.0)
     return total
+
+
+@task(name="transcript", retries=1, retry_delay_seconds=30)
+def t_transcript(video_id: str, user_id: str) -> int:
+    """YouTube captions -> time chunks -> bge -> text collection (the 2nd
+    branch). Best-effort: uploads have no captions, some videos have none, and
+    any failure just leaves the video visual-only — never fails the flow.
+    Runs AFTER embed-index (whose delete clears both branches first)."""
+    from ..config import ENABLE_TRANSCRIPT, TEXT_EMBED_VERSION
+    from ..rag.embeddings import embed_docs
+    from .transcript import chunk_cues, fetch_transcript
+
+    if not ENABLE_TRANSCRIPT:
+        return 0
+    row = db.get_video(video_id) or {}
+    if row.get("source") != "youtube" or not row.get("url"):
+        return 0  # uploaded files have no caption track
+    try:
+        chunks = chunk_cues(fetch_transcript(row["url"], video_id))
+        if not chunks:
+            print(f"[transcript] {video_id}: no captions — visual-only")
+            return 0
+        vector_store.ensure_text_collection()
+        vecs = embed_docs([c["text"] for c in chunks])
+        vector_store.upsert_chunks(user_id, video_id, vecs, payloads=[
+            {"user_id": user_id, "video_id": video_id, "modality": "text",
+             "t_start": c["t_start"], "t_end": c["t_end"],
+             "ms": int(c["t_start"] * 1000), "text": c["text"],
+             "embed_version": TEXT_EMBED_VERSION} for c in chunks])
+        print(f"[transcript] {video_id}: indexed {len(chunks)} transcript chunks")
+        return len(chunks)
+    except Exception as exc:
+        print(f"[transcript] {video_id}: failed ({type(exc).__name__}: {exc}) — visual-only")
+        return 0
 
 
 @flow(name="ms-ingest-video", log_prints=True, timeout_seconds=3600)
@@ -129,8 +165,10 @@ def ingest_video(video_id: str, user_id: str) -> dict:
             return {"video_id": video_id, "skipped": True}
         frames = t_sample(video_id, user_id, path)
         n = t_embed_index(video_id, user_id, frames)
-        print(f"[ingest] {video_id} indexed: {n} frames (attempt {attempt})")
-        return {"video_id": video_id, "frames": n}
+        # Transcript branch AFTER frames (embed-index's delete clears both first).
+        t = t_transcript(video_id, user_id)
+        print(f"[ingest] {video_id} indexed: {n} frames + {t} transcript chunks (attempt {attempt})")
+        return {"video_id": video_id, "frames": n, "transcript_chunks": t}
     except Exception as exc:
         db.set_status(video_id, "failed", error=f"{type(exc).__name__}: {exc}")
         raise  # Prefect marks the run Failed; full trace in the Cloud UI
