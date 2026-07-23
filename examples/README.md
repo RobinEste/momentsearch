@@ -40,12 +40,14 @@ python examples/quickstart.py --skip-ingest --ask "a slide listing examples of l
 Each result is a moment — video title, timestamp, similarity score, and a deep
 link that jumps straight to that point on YouTube.
 
-> Retrieval is fully local (CLIP). Set `LLM_API_KEY` in your `.env` to also get a
-> synthesized, frame-grounded answer from your own LLM.
+> Retrieval is local by default and needs no key — CLIP for visuals, bge for YouTube
+> transcripts. Set `LLM_API_KEY` in your `.env` to also get a synthesized, grounded
+> answer from your own LLM.
 
-### A note on podcasts
+### A note on content
 
-MomentSearch reads the **picture**, not audio. Talks with slides, diagrams, demos,
-and code (like these) are an ideal fit. For pure talking-head podcasts the visual
-signal is thin — it can find *scenes* (a speaker, a whiteboard) but not what was
-*said*. Pick content where the answer is something you can see.
+MomentSearch reads the **picture** for every video, and for **YouTube** also the
+**transcript** (captions), fusing the two. Talks with slides, diagrams, demos, and
+code (like these) are an ideal fit for the visual side. For pure talking-head
+podcasts the visual signal is thin — but on YouTube the transcript branch still
+surfaces what was *said*. Uploaded (non-YouTube) files are visual-only for now.

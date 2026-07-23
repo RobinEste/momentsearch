@@ -229,12 +229,13 @@ downscaled, gated — not the vector store.
 
 Which model writes the answer is resolved **per tenant**, in this order:
 
-1. **The user's own hosted model** — saved via `PUT /api/llm` (or the "Use
-   your own model" card in the UI): a **vLLM** / Ollama / LM Studio / Together
+1. **The user's own hosted model** — saved via `PUT /api/llm` (**backend-only —
+   not exposed in the UI**): a **vLLM** / Ollama / LM Studio / Together
    / OpenRouter endpoint (anything OpenAI-compatible) via `base_url`, NVIDIA
    NIM, or Anthropic. The model must be **vision-capable** — it is shown the
    actual frames (e.g. `Qwen/Qwen2.5-VL-7B-Instruct` or
-   `llava-hf/llava-v1.6-mistral-7b-hf` on vLLM).
+   `llava-hf/llava-v1.6-mistral-7b-hf` on vLLM). The UI only shows a read-only
+   badge of which model is active — there's no model-settings form.
 2. **The server default** — the `LLM_*` env config, used when the user hasn't
    attached one.
 3. **No model** — retrieval still works; answers degrade to honest
@@ -357,7 +358,7 @@ full? `fly scale count worker=3` or `docker compose up --scale worker=3` —
 workers only dial out, so replicas need zero coordination.
 
 **CLIP (the usual bottleneck) — "embedding is a URL".** Inference runs in a
-dedicated service ([clip_service.py](clip_service.py)): one warm model loaded
+dedicated service ([clip_service.py](src/clip_service.py)): one warm model loaded
 once at boot, api + workers send batches over HTTP (`CLIP_SERVICE_URL`).
 That's what makes workers cheap and stateless — no torch, no ~15-30s model
 reload per video — and it's the standard model-serving pattern (TEI / Triton /
@@ -421,7 +422,7 @@ nothing else changes.
 ### Continuous deployment (GitHub Actions)
 
 [`.github/workflows/fly-deploy.yml`](.github/workflows/fly-deploy.yml) deploys
-to Fly on every push to `main`. One-time setup — create a deploy token and add
+to Fly on every push to `dev`. One-time setup — create a deploy token and add
 it as the `FLY_API_TOKEN` repo secret (Settings → Secrets and variables →
 Actions):
 
@@ -478,7 +479,7 @@ the four entrypoints as top-level modules in the package.
 ├── .env.example             every env knob, documented inline
 ├── .github/
 │   └── workflows/
-│       └── fly-deploy.yml   CI: deploy to Fly on push to main
+│       └── fly-deploy.yml   CI: deploy to Fly on push to dev
 ├── ui/
 │   └── index.html           single-file web UI (presigned upload, status poll, player)
 ├── examples/
