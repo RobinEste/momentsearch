@@ -106,6 +106,30 @@ def embed_query_local(text: str) -> np.ndarray:
     return np.asarray(vec, dtype=np.float32)
 
 
+# ── OpenAI / OpenAI-compatible text embeddings (TEXT_EMBED_PROVIDER=openai) ────
+# Hosted alternative to bge for the transcript branch. Reuses the OpenAI client
+# (already a dependency for the LLM), so one OpenAI key powers both the answer
+# and the embeddings; TEXT_EMBED_BASE_URL points it at any OpenAI-compatible
+# embeddings server (e.g. a vLLM embeddings endpoint). Same model for docs and
+# query — no separate query prompt like bge.
+
+@lru_cache
+def _openai_embed_client():
+    from openai import OpenAI
+
+    return OpenAI(api_key=config.TEXT_EMBED_API_KEY or config.LLM_API_KEY or "not-needed",
+                  base_url=config.TEXT_EMBED_BASE_URL or None)
+
+
+def embed_openai(texts: list[str]) -> np.ndarray:
+    """Embed text (docs or query) via the OpenAI embeddings API, L2-normalized."""
+    if not texts:
+        return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
+    resp = _openai_embed_client().embeddings.create(
+        model=config.TEXT_EMBED_MODEL, input=texts)
+    return _normalize(np.asarray([d.embedding for d in resp.data], dtype=np.float32))
+
+
 # ── Remote inference (CLIP_SERVICE_URL set) ──────────────────────────────────
 
 def _post(path: str, payload: dict, timeout: int = 600) -> dict:
@@ -149,7 +173,10 @@ def embed_text(text: str) -> np.ndarray:
 
 
 def embed_docs(texts: list[str]) -> np.ndarray:
-    """Transcript chunks -> bge vectors (remote clip service, or local)."""
+    """Transcript chunks -> text vectors. Provider decides: OpenAI API, else bge
+    via the remote clip service, else bge in-process."""
+    if config.TEXT_EMBED_PROVIDER == "openai":
+        return embed_openai(texts)
     if config.CLIP_SERVICE_URL:
         if not texts:
             return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
@@ -159,7 +186,10 @@ def embed_docs(texts: list[str]) -> np.ndarray:
 
 
 def embed_query(text: str) -> np.ndarray:
-    """Search query -> bge vector for the transcript branch (remote, or local)."""
+    """Search query -> text vector for the transcript branch (same provider
+    dispatch as embed_docs)."""
+    if config.TEXT_EMBED_PROVIDER == "openai":
+        return embed_openai([text])[0]
     if config.CLIP_SERVICE_URL:
         vec = _post("/embed/query", {"text": text}, timeout=60)["vector"]
         return np.asarray(vec, dtype=np.float32)

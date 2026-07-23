@@ -34,7 +34,10 @@ from .rag import embeddings
 async def lifespan(app: FastAPI):
     dim = embeddings.embedding_dim()  # load CLIP NOW, not on first request
     print(f"[clip] {CLIP_MODEL} warm (dim {dim})")
-    if config.ENABLE_TRANSCRIPT:
+    # Only warm the local bge model when it's actually the text provider; with
+    # TEXT_EMBED_PROVIDER=openai the transcript branch calls OpenAI directly and
+    # never touches this service.
+    if config.ENABLE_TRANSCRIPT and config.TEXT_EMBED_PROVIDER != "openai":
         embeddings.embed_docs_local(["warmup"])  # load the bge text model too
         print(f"[clip] text model {config.TEXT_EMBED_MODEL} warm")
     yield

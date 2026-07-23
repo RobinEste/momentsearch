@@ -193,9 +193,11 @@ Poll `GET /api/videos` (or watch the UI chips) until `indexed`.
    - **visual** — CLIP text-embedding → Qdrant `moments`, filtered by `user_id`
      (private *and* fast: the tenant index means a search touches only that
      user's slice), quantization-rescored. Milliseconds.
-   - **text** — bge query-embedding → Qdrant `moments_text` (YouTube
-     transcripts). Skipped cleanly when `ENABLE_TRANSCRIPT=false` or nothing is
-     indexed yet.
+   - **text** — text query-embedding → Qdrant `moments_text` (YouTube
+     transcripts). The embedder is **provider-switchable** (`TEXT_EMBED_PROVIDER`):
+     **bge** via fastembed by default (CPU, free, no key — search stays keyless),
+     or **OpenAI** `text-embedding-3-*` (hosted, stronger) when you have a key.
+     Skipped cleanly when `ENABLE_TRANSCRIPT=false` or nothing is indexed yet.
 2. **Score — the fusion module** (`_fuse`, [src/rag/search.py](src/rag/search.py)).
    The two branches' raw scores are incomparable (CLIP ~0.3 vs bge ~0.7), so we
    never sort by raw score:
@@ -506,7 +508,7 @@ the four entrypoints as top-level modules in the package.
     │   ├── transcript.py    YouTube captions → time-chunks (the text branch)
     │   └── pipeline.py      the Prefect flow: fetch → sample → embed/index → transcript
     └── rag/
-        ├── embeddings.py    CLIP image+text + bge transcript — in-process or remote
+        ├── embeddings.py    CLIP image+text + transcript (bge or OpenAI) — in-proc/remote
         ├── vector_store.py  multi-tenant Qdrant: visual + text collections, int8/on-disk
         └── search.py        2-branch retrieve → RRF fusion/scoring → gate → cited answer
 ```

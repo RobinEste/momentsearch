@@ -169,8 +169,28 @@ EMBED_VERSION = os.getenv("EMBED_VERSION", f"{CLIP_MODEL}-v1")
 # captions just indexes visually (the branch is skipped, never fatal).
 ENABLE_TRANSCRIPT = _envbool("ENABLE_TRANSCRIPT", True)
 TEXT_COLLECTION = os.getenv("TEXT_COLLECTION", "moments_text")
-TEXT_EMBED_MODEL = os.getenv("TEXT_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
-TEXT_EMBED_DIM = _int("TEXT_EMBED_DIM", 384)   # bge-small-en-v1.5 = 384
+# Transcript-branch embedding PROVIDER — env decides the model:
+#   fastembed (default) -> bge via fastembed: CPU, free, NO API key (keeps search
+#                          working keyless for a fresh cloner). Dim 384.
+#   openai              -> OpenAI (or any OpenAI-compatible) embeddings API, e.g.
+#                          text-embedding-3-small. Hosted, stronger retrieval,
+#                          costs per call + needs a key. Reuses the LLM_* key /
+#                          base_url by default (override with TEXT_EMBED_API_KEY /
+#                          TEXT_EMBED_BASE_URL). Setting the provider alone flips
+#                          the default model+dim to 3-small / 1536.
+# The model & dim MUST match between indexing and querying, so switching provider
+# means RE-SEEDING the transcript collection (its vector dim changes). The two
+# branches fuse by RANK (RRF), so the text model is independent of CLIP.
+TEXT_EMBED_PROVIDER = os.getenv("TEXT_EMBED_PROVIDER", "fastembed").strip().lower()
+_TE_OPENAI = TEXT_EMBED_PROVIDER == "openai"
+TEXT_EMBED_MODEL = os.getenv(
+    "TEXT_EMBED_MODEL",
+    "text-embedding-3-small" if _TE_OPENAI else "BAAI/bge-small-en-v1.5")
+TEXT_EMBED_DIM = _int("TEXT_EMBED_DIM", 1536 if _TE_OPENAI else 384)
+# openai provider: falls back to the LLM key/base_url in embeddings.py so ONE
+# OpenAI key can power both the answer and the text embeddings.
+TEXT_EMBED_API_KEY = os.getenv("TEXT_EMBED_API_KEY", "").strip()
+TEXT_EMBED_BASE_URL = os.getenv("TEXT_EMBED_BASE_URL", "").strip()
 TEXT_EMBED_VERSION = os.getenv("TEXT_EMBED_VERSION", f"{TEXT_EMBED_MODEL}-v1")
 # Transcript chunking: group caption cues into ~CHUNK_SECONDS windows so a chunk
 # is a coherent spoken passage with a real t_start/t_end, not one tiny cue.
