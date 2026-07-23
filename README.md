@@ -31,8 +31,8 @@ there.
 
 ## Architecture
 
-The design rule (same as its sibling, `digital-twin-akash`): **stateful =
-rented managed service, stateless = this repo's code.** Every API box and
+The design rule: **stateful = rented managed service, stateless = this repo's
+code.** Every API box and
 worker is disposable; durable state lives in object storage, Qdrant and
 Postgres — "nothing on local."
 
