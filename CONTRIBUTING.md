@@ -40,8 +40,9 @@ Open http://localhost:8000.
   keep it that way unless there's a strong reason.
 - **Retrieval stays local.** CLIP runs without any API key. The LLM is only for the final
   answer; new features shouldn't make a key mandatory for search.
-- **Visual, not audio.** MomentSearch deliberately ignores audio/transcripts. Audio features
-  are out of scope for this repo.
+- **Visual-first, multimodal for YouTube.** The core is visual (CLIP over frames); for
+  YouTube it also indexes the **transcript** (captions) and fuses the two branches by rank.
+  Uploaded files stay visual-only for now (no audio transcription yet — that'd need Whisper).
 - Each backend module has one job — see the layout in the README. Match the existing style
   (type hints, short docstrings explaining *why*).
 
