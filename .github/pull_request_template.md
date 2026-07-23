@@ -4,8 +4,8 @@ Briefly describe the change and the motivation.
 
 ## Checklist
 
-- [ ] App still boots (`uvicorn backend.app.main:app`)
-- [ ] `python -m py_compile backend/app/*.py` passes
+- [ ] App still boots (`uvicorn src.app:app`)
+- [ ] `python -m py_compile src/**/*.py` passes
 - [ ] Kept it minimal (no build step added to the frontend without discussion)
 - [ ] Retrieval still works without an LLM key
 - [ ] Updated README / `.env.example` if config changed

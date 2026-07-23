@@ -19,14 +19,17 @@ You need **Python 3.11+** and **FFmpeg**.
 git clone https://github.com/traversaal-ai/momentsearch.git
 cd momentsearch
 
-# Qdrant
-docker run -p 6333:6333 qdrant/qdrant
+# Easiest: the full stack (qdrant + clip service + api + worker) in one command
+cp .env.example .env            # fill in DATABASE_URL + PREFECT_API_URL/KEY
+docker compose up --build
 
-# Backend
+# Or bare processes (API + worker; add the clip service if you want warm embeds)
 python -m venv .venv && source .venv/bin/activate
-pip install -r backend/requirements.txt
-cp .env.example .env            # add an LLM key if you want synthesized answers
-uvicorn backend.app.main:app --reload --port 8000
+pip install -r requirements.txt
+docker run -p 6333:6333 qdrant/qdrant
+uvicorn src.app:app --reload --port 8000   # terminal 1 — API + UI
+python -m src.worker                       # terminal 2 — ingest worker
+uvicorn src.clip_service:app --port 8001   # terminal 3 — CLIP service (or unset CLIP_SERVICE_URL)
 ```
 
 Open http://localhost:8000.
@@ -46,7 +49,7 @@ Open http://localhost:8000.
 
 1. Fork and branch from `main`.
 2. Keep PRs focused; describe what and why.
-3. Make sure the app still boots and `python -m py_compile backend/app/*.py` passes.
+3. Make sure the app still boots and `python -m py_compile src/**/*.py` passes.
 4. By contributing, you agree your work is licensed under Apache 2.0.
 
 ## Code of conduct

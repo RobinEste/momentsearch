@@ -14,12 +14,17 @@ The demo corpus:
 | 3Blue1Brown — *Attention in transformers, step-by-step* | 26m | attention-matrix visuals |
 | Andrej Karpathy — *[1hr Talk] Intro to LLMs* | 60m | slide-based talk on stage |
 
+> **Note:** if you run the app with `docker compose up`, the worker
+> **auto-ingests these four talks on first boot** (`SEED_SAMPLE_VIDEOS=true`)
+> — no manual step needed. This script is the manual, in-process route, plus
+> a terminal demo of the sample queries.
+
 ### Run it
 
 ```bash
-# 1. Qdrant + FFmpeg + deps
+# 1. Qdrant + FFmpeg + deps + .env (needs DATABASE_URL; see .env.example)
 docker run -p 6333:6333 qdrant/qdrant
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 
 # 2. Ingest the four videos and run the sample queries
 python examples/quickstart.py
