@@ -56,7 +56,7 @@ def t_fetch(video_id: str, user_id: str) -> str:
         source_hash = fetch_mod.sha256_file(path)
         db.set_status(video_id, "fetching", source_hash=source_hash)
 
-    dup = db.find_duplicate(user_id, source_hash, exclude_id=video_id)
+    dup = db.find_duplicate(user_id, source_hash, exclude_id=video_id, kind="video")
     if dup:
         path.unlink(missing_ok=True)
         db.set_status(video_id, "skipped", error=f"duplicate of {dup['id']}")

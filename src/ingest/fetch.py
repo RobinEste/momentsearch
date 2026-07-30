@@ -42,6 +42,19 @@ def fetch_upload(storage_key: str, video_id: str) -> Path:
 _MAX_REDIRECTS = 5
 
 
+def _is_internal(address: str) -> bool:
+    """Is this IP inside our own network rather than out on the internet?"""
+    import ipaddress
+
+    ip = ipaddress.ip_address(address)
+    # An IPv4 address smuggled inside IPv6 notation (::ffff:169.254.169.254,
+    # 6to4, NAT64) has to be judged on the address it really means.
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
 def _guard_url(url: str) -> None:
     """Refuse a URL that resolves to an address inside our own network.
 
@@ -52,13 +65,13 @@ def _guard_url(url: str) -> None:
     Registration cannot do this check — it must not touch the source at all, and
     DNS can change between then and now — so it belongs here, at fetch time.
 
-    Honest about the residual risk: the name is resolved here and resolved again
-    by the socket layer, so a DNS entry that flips between the two answers
-    (rebinding) still gets through. Closing that needs pinning the connection to
-    the validated address, which urllib does not expose; the cheap defence is
-    egress filtering at the network level.
+    This is the cheap first pass, and on its own it is bypassable: it resolves
+    the name, and the socket layer resolves it again when connecting. A DNS
+    entry that answers differently to the two lookups (rebinding) walks straight
+    through. `_GuardedConnection` below closes that by checking the address the
+    socket ACTUALLY connected to; this function stays because a clear rejection
+    before any connection attempt is a better error than one halfway through.
     """
-    import ipaddress
     import socket
     from urllib.parse import urlsplit
 
@@ -74,11 +87,8 @@ def _guard_url(url: str) -> None:
     except OSError as exc:
         raise ValueError(f"Cannot resolve {host}: {exc}") from None
     for info in infos:
-        address = ipaddress.ip_address(info[4][0])
-        if (address.is_private or address.is_loopback or address.is_link_local
-                or address.is_reserved or address.is_multicast
-                or address.is_unspecified):
-            raise ValueError(f"Refusing to fetch {host}: resolves to {address}, "
+        if _is_internal(info[4][0]):
+            raise ValueError(f"Refusing to fetch {host}: resolves to {info[4][0]}, "
                              "which is inside our own network.")
 
 
@@ -97,6 +107,27 @@ class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _guarded_connection(base):
+    """Wrap an http.client connection class so it checks where it LANDED.
+
+    This is what closes DNS rebinding. `_guard_url` resolves the name, and the
+    socket resolves it again a moment later; a record with a one-second TTL can
+    answer "public" to the first and "127.0.0.1" to the second. Checking the
+    peer address after connect() catches that, and it runs before any request
+    bytes are written, so a rebound host gets no request at all — not even the
+    blind kind whose side effect is the whole point.
+    """
+    class _Guarded(base):
+        def connect(self):
+            super().connect()
+            peer = self.sock.getpeername()[0]
+            if _is_internal(peer):
+                self.close()
+                raise ValueError(f"Refusing to fetch {self.host}: connected to "
+                                 f"{peer}, which is inside our own network.")
+    return _Guarded
+
+
 def _safe_opener() -> urllib.request.OpenerDirector:
     """An opener that speaks http(s) and nothing else.
 
@@ -105,8 +136,19 @@ def _safe_opener() -> urllib.request.OpenerDirector:
     this image]. None of those belong on a path that fetches user-supplied URLs,
     so the opener is built from the handlers we want instead of by subtraction.
     """
+    import http.client
+
+    class _PinnedHTTP(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_guarded_connection(http.client.HTTPConnection), req)
+
+    class _PinnedHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_guarded_connection(http.client.HTTPSConnection), req,
+                                context=self._context)
+
     opener = urllib.request.OpenerDirector()
-    for handler in (urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(),
+    for handler in (_PinnedHTTP(), _PinnedHTTPS(),
                     urllib.request.HTTPErrorProcessor(), _GuardedRedirects()):
         opener.add_handler(handler)
     return opener

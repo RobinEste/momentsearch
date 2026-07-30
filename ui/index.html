@@ -213,15 +213,19 @@ async function loadVideos(){
   indexedIds.forEach(id=>{ if(!KNOWN.has(id)){ KNOWN.add(id); SELECTED.add(id); }});
   [...KNOWN].forEach(id=>{ if(!indexedIds.has(id)){ KNOWN.delete(id); SELECTED.delete(id); }});
 
-  const srcLabel=v=>v.is_sample?"sample":(v.source==="youtube"?"YouTube":"upload");
+  const srcLabel=v=>v.is_sample?"sample":(v.source==="youtube"?"YouTube":(v.source==="url"?"URL":"upload"));
   const pct=v=>v.progress?` ${Math.round(v.progress*100)}%`:"";
-  // A leading status indicator so each video's state is obvious at a glance.
+  // The manifest column is called frame_count for every kind, but a document
+  // stores its chunk count there. "42f" on a paper reads as 42 frames, which is
+  // not a thing a paper has.
+  const unit=v=>(v.kind && v.kind!=="video") ? "chunks" : "f";
+  // A leading status indicator so each source's state is obvious at a glance.
   function badge(v){
     switch(v.status){
-      case "indexed":   return {icon:"✓", label:`${v.frame_count||0}f · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
+      case "indexed":   return {icon:"✓", label:`${v.frame_count||0}${unit(v)==="f"?"f":" "+unit(v)} · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
       case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
       case "queued":    return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
-      case "fetching":  return {icon:"⏬", label:"fetching video…",  c:"text-[#8a6d1a]"};
+      case "fetching":  return {icon:"⏬", label:`fetching ${(v.kind&&v.kind!=="video")?v.kind:"video"}…`, c:"text-[#8a6d1a]"};
       case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
       case "parsing":   return {icon:"⏳", label:"parsing"+pct(v),   c:"text-[#8a6d1a]"};
       case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};

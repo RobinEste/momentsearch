@@ -19,8 +19,9 @@ from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
 from . import vector_store
 from .embeddings import embed_query, embed_text
 
-ABSTAIN = ("I couldn't find that in your videos — nothing indexed looks "
-           "related to the question (neither what's on screen nor what's said).")
+ABSTAIN = ("I couldn't find that in your sources — nothing indexed looks "
+           "related to the question (neither what's on screen, what's said, "
+           "nor what's written).")
 
 
 def _seconds(ms: int) -> str:
@@ -269,7 +270,8 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
     result: dict[str, Any] = {"question": question, "citations": citations}
 
     if not citations:
-        result.update(answer="No relevant moments were found. Try ingesting a video first.",
+        result.update(answer="Nothing relevant was found. Try ingesting a video or "
+                             "a document first.",
                       llm_used=False, abstained=True)
         return result
 

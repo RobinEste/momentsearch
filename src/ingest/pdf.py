@@ -32,7 +32,17 @@ from dataclasses import dataclass
 # A line must repeat on at least this share of pages to count as a running
 # head/foot rather than as content. Deliberately high: dropping a real sentence
 # that happens to recur is worse than keeping a page number.
-_REPEAT_SHARE = 0.5
+# A running head sits on nearly every page, so the bar can be high — and it has
+# to be, because this is a pure frequency heuristic with no idea where on the
+# page a line sits. At 50% it also strips content that merely recurs: a repeated
+# statistical note through a results section, a disclaimer under every figure.
+# At 0.9 a header still qualifies (it is on all of them) while text that happens
+# to appear on four fifths of the pages survives.
+#
+# This narrows the failure, it does not remove it: a line on every page that is
+# genuinely content will still be dropped. Fixing that properly needs the
+# position of the line on the page, which this extractor does not give us.
+_REPEAT_SHARE = 0.9
 # Below this, "repeats often" means nothing, and the absolute floor of three
 # occurrences matters as much as the share: at four pages a 50% share is two
 # hits, and a heading that also appears in the table of contents hits exactly
@@ -46,6 +56,15 @@ _MAX_REPEAT_LINE_CHARS = 120   # a long repeated line is more likely boilerplate
 # longest thing anyone would reasonably ingest here is a thesis.
 MAX_PAGES = 1000
 
+# Ceiling on EXTRACTED text, which is a different quantity from both of the
+# above and the one that actually bounds memory. A PDF content stream is
+# compressed, so neither the file size nor the page count says anything about
+# how much text comes out: measured, a 211 KB file whose single page repeats a
+# text-drawing operator decompresses to 87 MB and peaks at 1.3 GB of RSS, and a
+# 1 MB one at 6.1 GB — enough to OOM a worker that every tenant shares. Real
+# papers land far below this: a dense 1000-page thesis is roughly 5 M characters.
+MAX_TEXT_CHARS = 8_000_000
+
 
 @dataclass(frozen=True)
 class Page:
@@ -56,7 +75,7 @@ class Page:
     section: str | None = None
 
 
-def _section_map(doc) -> dict[int, str]:
+def _section_map(doc, page_count: int) -> dict[int, str]:
     """page index (0-based) -> heading path, from the PDF outline.
 
     Empty when the PDF carries no bookmarks, which is common enough that every
@@ -89,7 +108,11 @@ def _section_map(doc) -> dict[int, str]:
     mapping: dict[int, str] = {}
     path: list[str] = []
     cursor = 0
-    for page_index in range(max(e[0] for e in entries) + 1):
+    # To the end of the document, not to the last bookmark: a section runs until
+    # the next one starts, so the pages after the final heading still belong to
+    # it. Stopping at the last entry drops the section path from exactly the
+    # pages that carry the conclusion — the part most likely to be cited.
+    for page_index in range(page_count):
         while cursor < len(entries) and entries[cursor][0] <= page_index:
             _, level, title = entries[cursor]
             path = path[:level] + [title]
@@ -138,9 +161,20 @@ def parse_pdf(data: bytes) -> list[Page]:
     # pages. Checked before iterating, because the iteration IS the cost.
     if len(doc) > MAX_PAGES:
         raise ValueError(f"Document has {len(doc)} pages, over the {MAX_PAGES} limit.")
-    raw = [page.get_textpage().get_text_bounded() for page in doc]
+    # Accumulated page by page rather than checked at the end: the point is to
+    # stop before the memory is allocated, not to discover afterwards that it was.
+    raw: list[str] = []
+    total = 0
+    for page in doc:
+        text = page.get_textpage().get_text_bounded()
+        total += len(text)
+        if total > MAX_TEXT_CHARS:
+            raise ValueError(
+                f"Document yields more than {MAX_TEXT_CHARS} characters of text "
+                f"(reached at page {len(raw) + 1}) — refusing to continue.")
+        raw.append(text)
     drop = _repeated_lines(raw)
-    sections = _section_map(doc)
+    sections = _section_map(doc, len(raw))
     return [Page(number=i + 1, text=_clean(text, drop), section=sections.get(i))
             for i, text in enumerate(raw)]
 

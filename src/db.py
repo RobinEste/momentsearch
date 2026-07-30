@@ -44,7 +44,10 @@ def pool() -> ConnectionPool:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ms_videos (
-    id           TEXT PRIMARY KEY,           -- yt_<id> | up_<uuid> | doc_<uuid>
+    -- yt_<youtube id> | up_<uuid> | doc_<hash of kind + normalized uri>. The
+    -- document form is deterministic on purpose: re-registering the same source
+    -- updates its row instead of adding a near-duplicate.
+    id           TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL,
     kind         TEXT NOT NULL DEFAULT 'video',  -- video | paper | deck
     source       TEXT NOT NULL,              -- youtube | upload
@@ -99,9 +102,13 @@ def upsert_pending(source: dict[str, Any]) -> dict:
 
     `kind` is a required key with no Python-side default, on purpose. The column
     defaults to 'video', so a caller that omits it would file a paper as a video
-    silently — the loud KeyError from psycopg is the better outcome. Note that
-    ON CONFLICT deliberately leaves `kind` alone: ids are kind-scoped by
-    construction (yt_/up_/doc_), so a re-submission is always the same kind.
+    silently — the loud KeyError from psycopg is the better outcome.
+
+    ON CONFLICT deliberately leaves `kind` alone, and that is only safe because
+    every id carries its kind: yt_/up_ are videos by construction, and a doc_ id
+    hashes the kind together with the URI (see api/admin.py::_document_id). A
+    re-submission therefore always lands on a row of the same kind. Drop that
+    property and this clause starts silently ignoring a corrected kind.
     """
     with pool().connection() as conn:
         row = conn.execute(
@@ -163,16 +170,25 @@ def get_video(video_id: str) -> dict | None:
         return conn.execute("SELECT * FROM ms_videos WHERE id = %s", (video_id,)).fetchone()
 
 
-def find_duplicate(user_id: str, source_hash: str, exclude_id: str) -> dict | None:
-    """An already-indexed video with the same content for the same user."""
+def find_duplicate(user_id: str, source_hash: str, exclude_id: str,
+                   kind: str) -> dict | None:
+    """An already-indexed source of the SAME KIND with the same content.
+
+    Scoped by kind because identical bytes can be two legitimate sources: the
+    same PDF ingested as a paper (page locators, text route) and as a deck
+    (slide locators, its own route) are different products of the same file.
+    Without this filter the second one is silently marked 'skipped' as a
+    duplicate of the first, and never gets indexed at all.
+    """
     with pool().connection() as conn:
         return conn.execute(
             """
             SELECT * FROM ms_videos
-            WHERE user_id = %s AND source_hash = %s AND id <> %s AND status = 'indexed'
+            WHERE user_id = %s AND source_hash = %s AND id <> %s AND kind = %s
+              AND status = 'indexed'
             LIMIT 1
             """,
-            (user_id, source_hash, exclude_id),
+            (user_id, source_hash, exclude_id, kind),
         ).fetchone()
 
 

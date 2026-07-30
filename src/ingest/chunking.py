@@ -117,11 +117,29 @@ def chunk_text(text: str) -> list[str]:
 
     # The overlap can push a chunk past the target; the ceiling is what protects
     # against silent truncation, so enforce it after packing rather than before.
-    capped: list[str] = []
+    result: list[str] = []
     for chunk in chunks:
-        capped.extend([chunk] if len(chunk) <= CHUNK_MAX_CHARS
-                      else _hard_split(chunk, CHUNK_MAX_CHARS))
-    return [c.strip() for c in capped if len(c.strip()) >= MIN_CHUNK_CHARS]
+        if len(chunk) <= CHUNK_MAX_CHARS:
+            if len(chunk.strip()) >= MIN_CHUNK_CHARS:
+                result.append(chunk.strip())
+            continue
+        # Every part of an over-long chunk is kept, however short the last one
+        # is. Merging that tail back would undo the split for anything between
+        # the ceiling and ceiling+MIN_CHUNK_CHARS, leaving the "hard ceiling"
+        # quietly unenforced; dropping it would lose real text. Neither, then.
+        result.extend(part.strip() for part
+                      in _hard_split(chunk, CHUNK_MAX_CHARS, merge_short_tail=False)
+                      if part.strip())
+
+    if not result and chunks:
+        # The gate at the top accepted this text, so returning nothing here would
+        # silently drop a whole page. It happens because that gate measures the
+        # text with its paragraph breaks while the packer rejoins paragraphs with
+        # a single newline — one character shorter per boundary, which is enough
+        # to fall under the minimum. Keep the content rather than the arithmetic.
+        merged = "\n".join(c.strip() for c in chunks).strip()
+        return [merged] if merged else []
+    return result
 
 
 def verify_token_limit(chunks: list[str], count_tokens) -> list[tuple[int, str]]:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -117,6 +118,15 @@ class RegisterRequest(BaseModel):
 @router.post("", status_code=202, dependencies=[Depends(require_auth)])
 def register(req: RegisterRequest, uid: str = Depends(user_id)):
     if req.url:
+        # The scheme is checked separately because _YT_RE is not anchored: it
+        # searches, so "javascript:alert(1)//youtube.com/watch?v=dQw4w9WgXcQ"
+        # matches on the tail while the whole string — javascript: prefix and
+        # all — is what gets stored, handed to _deeplink() and finally set as an
+        # href by the UI. One click then runs it. Same 400 as before, so the
+        # contract does not change; only input that could never be a video URL
+        # is rejected.
+        if urlsplit(req.url).scheme not in ("http", "https"):
+            raise HTTPException(400, "Not a recognizable YouTube URL.")
         m = _YT_RE.search(req.url)
         if not m:
             raise HTTPException(400, "Not a recognizable YouTube URL.")

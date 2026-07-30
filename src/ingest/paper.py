@@ -68,7 +68,8 @@ def t_fetch(doc_id: str, user_id: str) -> tuple[str, str | None]:
 
     source_hash = fetch_mod.sha256_file(path)
     db.set_status(doc_id, "fetching", source_hash=source_hash)
-    duplicate = db.find_duplicate(user_id, source_hash, exclude_id=doc_id)
+    duplicate = db.find_duplicate(user_id, source_hash, exclude_id=doc_id,
+                                  kind=row["kind"])
     if duplicate:
         path.unlink(missing_ok=True)
         db.set_status(doc_id, "skipped", error=f"duplicate of {duplicate['id']}")
