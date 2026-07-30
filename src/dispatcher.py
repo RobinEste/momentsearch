@@ -28,12 +28,16 @@ from . import config, db, jobs
 
 
 def dispatch_once() -> int:
-    """Admit as many fairly-chosen pending videos as free capacity allows.
-    Returns how many were dispatched this tick."""
+    """Admit as many fairly-chosen pending sources as free capacity allows.
+    Returns how many were dispatched this tick.
+
+    Only kinds with an ingest flow are claimed (config.DISPATCHABLE_KINDS); the
+    rest keep waiting as `pending`, which costs no capacity and loses nothing.
+    """
     slots = config.DISPATCH_MAX_INFLIGHT - db.count_inflight()
     if slots <= 0:
         return 0
-    claimed = db.wfq_claim(slots)
+    claimed = db.wfq_claim(slots, config.DISPATCHABLE_KINDS)
     for row in claimed:
         try:
             jobs.enqueue_video(row["id"], row["user_id"])
@@ -41,7 +45,7 @@ def dispatch_once() -> int:
             # Couldn't reach Prefect — put it back so it's retried next tick.
             db.set_status(row["id"], "pending", error=f"dispatch: {exc}")
     if claimed:
-        print(f"[dispatch] admitted {len(claimed)} video(s) "
+        print(f"[dispatch] admitted {len(claimed)} source(s) "
               f"({db.count_inflight()}/{config.DISPATCH_MAX_INFLIGHT} in flight)")
     return len(claimed)
 

@@ -94,13 +94,20 @@ def init_schema() -> None:
         conn.execute(SCHEMA)
 
 
-def upsert_pending(video: dict[str, Any]) -> dict:
-    """Insert a video as pending; re-submitting an existing id resets it."""
+def upsert_pending(source: dict[str, Any]) -> dict:
+    """Insert a source as pending; re-submitting an existing id resets it.
+
+    `kind` is a required key with no Python-side default, on purpose. The column
+    defaults to 'video', so a caller that omits it would file a paper as a video
+    silently — the loud KeyError from psycopg is the better outcome. Note that
+    ON CONFLICT deliberately leaves `kind` alone: ids are kind-scoped by
+    construction (yt_/up_/doc_), so a re-submission is always the same kind.
+    """
     with pool().connection() as conn:
         row = conn.execute(
             """
-            INSERT INTO ms_videos (id, user_id, source, url, storage_key, source_hash, title, status)
-            VALUES (%(id)s, %(user_id)s, %(source)s, %(url)s, %(storage_key)s,
+            INSERT INTO ms_videos (id, user_id, kind, source, url, storage_key, source_hash, title, status)
+            VALUES (%(id)s, %(user_id)s, %(kind)s, %(source)s, %(url)s, %(storage_key)s,
                     %(source_hash)s, %(title)s, 'pending')
             ON CONFLICT (id) DO UPDATE SET
                 url = COALESCE(EXCLUDED.url, ms_videos.url),
@@ -110,7 +117,7 @@ def upsert_pending(video: dict[str, Any]) -> dict:
                 status = 'pending', error = NULL, progress = NULL, updated_at = now()
             RETURNING *
             """,
-            video,
+            source,
         ).fetchone()
     return row
 
@@ -212,17 +219,23 @@ def count_inflight() -> int:
     return row["n"] if row else 0
 
 
-def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending videos in FAIR (round-robin across
+def wfq_claim(limit: int, kinds: tuple[str, ...]) -> list[dict]:
+    """Atomically claim up to `limit` pending sources in FAIR (round-robin across
     users) order, flipping them pending -> queued. Returns the claimed rows.
 
-    Fairness: rank each user's pending videos by age (row_number partitioned by
+    Fairness: rank each user's pending sources by age (row_number partitioned by
     user_id), then order by that rank first — so we take everyone's oldest, then
-    everyone's 2nd, ... A user who dumped 50 videos only gets one slot per round,
+    everyone's 2nd, ... A user who dumped 50 sources only gets one slot per round,
     exactly like the others. The UPDATE ... WHERE status='pending' RETURNING is
     the atomic claim: if two dispatchers race, each row is handed out once.
+
+    Fairness spans kinds: a bulk of papers and a queue of videos take turns in one
+    line, which is the point of admitting them from the same manifest. `kinds`
+    narrows that to the types an ingest flow actually exists for — a kind left out
+    stays `pending` instead of being handed to the wrong flow, and joins the line
+    for real the moment its flow lands.
     """
-    if limit <= 0:
+    if limit <= 0 or not kinds:
         return []
     with pool().connection() as conn:
         picked = conn.execute(
@@ -230,12 +243,12 @@ def wfq_claim(limit: int) -> list[dict]:
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending'
+                FROM ms_videos WHERE status = 'pending' AND kind = ANY(%s)
             ) t
             ORDER BY rn, id
             LIMIT %s
             """,
-            (limit,),
+            (list(kinds), limit),
         ).fetchall()
         ids = [r["id"] for r in picked]
         if not ids:
@@ -244,7 +257,7 @@ def wfq_claim(limit: int) -> list[dict]:
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
             WHERE id = ANY(%s) AND status = 'pending'
-            RETURNING id, user_id
+            RETURNING id, user_id, kind
             """,
             (ids,),
         ).fetchall()

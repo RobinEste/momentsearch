@@ -79,7 +79,7 @@ def seed_to_completion() -> bool:
             vid = sample_video_id(v["url"])
             print(f"[seed] -> {vid}: {v['title']}", flush=True)
             db.upsert_pending({"id": vid, "user_id": config.DEFAULT_USER_ID,
-                               "source": "youtube", "url": v["url"],
+                               "kind": "video", "source": "youtube", "url": v["url"],
                                "storage_key": None, "source_hash": vid,
                                "title": v["title"]})
             try:

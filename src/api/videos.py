@@ -121,7 +121,8 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
         if not m:
             raise HTTPException(400, "Not a recognizable YouTube URL.")
         video_id = f"yt_{m.group(1)}"
-        row = db.upsert_pending({"id": video_id, "user_id": uid, "source": "youtube",
+        row = db.upsert_pending({"id": video_id, "user_id": uid, "kind": "video",
+                                 "source": "youtube",
                                  "url": req.url, "storage_key": None,
                                  "source_hash": video_id, "title": req.title})
     elif req.video_id and req.key:
@@ -135,7 +136,8 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
             storage.delete_key(req.key)
             raise HTTPException(413, f"Object exceeds the {MAX_UPLOAD_MB}MB limit.")
         title = req.title or Path(req.key).stem
-        row = db.upsert_pending({"id": req.video_id, "user_id": uid, "source": "upload",
+        row = db.upsert_pending({"id": req.video_id, "user_id": uid, "kind": "video",
+                                 "source": "upload",
                                  "url": None, "storage_key": req.key,
                                  "source_hash": None, "title": title})
     else:
@@ -151,7 +153,7 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
 
 # ── Status / lifecycle ─────────────────────────────────────────────────────────
 
-_PUBLIC_FIELDS = ("id", "source", "url", "title", "status", "error",
+_PUBLIC_FIELDS = ("id", "kind", "source", "url", "title", "status", "error",
                   "frame_count", "progress", "attempts", "created_at", "updated_at")
 
 

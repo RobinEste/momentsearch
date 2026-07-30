@@ -123,6 +123,12 @@ VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
 TERMINAL_STATUSES = ("indexed", "skipped", "failed")
 NOT_INFLIGHT_STATUSES = ("pending",) + TERMINAL_STATUSES
 
+# Kinds the dispatcher may admit, i.e. the ones an ingest flow exists for. A
+# registered source of any other kind is accepted (202) and waits `pending`
+# rather than being handed to the wrong flow. Add 'paper' / 'deck' here in the
+# same change that adds their flow, not before.
+DISPATCHABLE_KINDS = ("video",)
+
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs
 # them in submitted order, so one user with 50 videos blocks everyone behind
