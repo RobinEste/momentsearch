@@ -99,7 +99,10 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id)):
 
     normalized = _normalize_uri(uri)
 
-    if uri.startswith(_STORAGE_SCHEME):
+    # Case-insensitive, because urlsplit lowercases the scheme everywhere else
+    # in this module: without it "STORAGE://..." would fall through to the http
+    # check and be rejected, while its lowercase twin registers fine.
+    if uri[:len(_STORAGE_SCHEME)].lower() == _STORAGE_SCHEME:
         key = _validate_storage_key(uri[len(_STORAGE_SCHEME):])
         # An object in OUR OWN storage may be checked: it is one local call, and
         # a missing object is a client mistake worth reporting immediately. An
@@ -121,11 +124,10 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id)):
                              "storage_key": storage_key,
                              "source_hash": source_hash, "title": req.title})
 
-    # Left `pending` deliberately, in both dispatch modes. The dispatcher admits
-    # it once an ingest flow for this kind exists (config.DISPATCHABLE_KINDS);
-    # calling jobs.enqueue_video here would either let a bulk of documents jump
-    # the fair queue and starve the video users, or start the VIDEO flow on a
-    # paper row.
+    # Left `pending` deliberately, in both dispatch modes: the dispatcher admits
+    # it in fair order once an ingest flow for this kind exists
+    # (jobs.INGEST_DEPLOYMENTS). Enqueueing here instead would let a bulk of
+    # documents jump the queue and starve the video users.
     return {"id": row["id"], "kind": row["kind"], "status": row["status"]}
 
 

@@ -84,3 +84,17 @@ def embed_docs(req: DocsRequest):
 @app.post("/embed/query")
 def embed_query(req: TextRequest):
     return {"vector": embeddings.embed_query_local(req.text).tolist()}
+
+
+@app.post("/count_tokens")
+def count_tokens(req: DocsRequest):
+    """Token counts for the text model, so the chunker can stay under its limit.
+
+    This lives here because this service owns the model, and the model owns the
+    limit: bge truncates at 512 tokens without raising, so a chunk sized by a
+    character budget can lose its tail in silence. Measured on real papers, the
+    chars-per-token ratio swings from 5.2 (prose) to 2.0 (tables and formulas),
+    which is why no character cap can guarantee that invariant.
+    """
+    return {"counts": embeddings.count_tokens_local(req.texts),
+            "limit": embeddings.text_token_limit()}

@@ -100,6 +100,9 @@ FRAME_KEY_PREFIX = "frames/"
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
 PRESIGN_GET_EXPIRY_S = _int("PRESIGN_GET_EXPIRY_S", 3600)  # thumbnails / playback
 MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 2048)                # register rejects bigger objects
+# Documents are two orders of magnitude smaller than video, and this cap is the
+# only thing standing between "a URL a user pasted" and the worker's disk.
+MAX_DOCUMENT_MB = _int("MAX_DOCUMENT_MB", 64)
 ALLOWED_UPLOAD_TYPES = ("video/",)                         # content-type must start with
 
 # --- Video ingest lifecycle ---------------------------------------------------
@@ -122,12 +125,6 @@ VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
 # reaper can see).
 TERMINAL_STATUSES = ("indexed", "skipped", "failed")
 NOT_INFLIGHT_STATUSES = ("pending",) + TERMINAL_STATUSES
-
-# Kinds the dispatcher may admit, i.e. the ones an ingest flow exists for. A
-# registered source of any other kind is accepted (202) and waits `pending`
-# rather than being handed to the wrong flow. Add 'paper' / 'deck' here in the
-# same change that adds their flow, not before.
-DISPATCHABLE_KINDS = ("video",)
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

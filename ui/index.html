@@ -223,6 +223,7 @@ async function loadVideos(){
       case "queued":    return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
       case "fetching":  return {icon:"⏬", label:"fetching video…",  c:"text-[#8a6d1a]"};
       case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
+      case "parsing":   return {icon:"⏳", label:"parsing"+pct(v),   c:"text-[#8a6d1a]"};
       case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};
       case "failed":    return {icon:"⚠", label:"failed",           c:"text-coral2"};
       case "skipped":   return {icon:"⊘", label:"duplicate",        c:"text-muted"};
@@ -294,13 +295,18 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
    queued (you can add more right away) and let a single background refresher
    update the chips until nothing is processing. Per-video progress shows on
    the chips themselves (sampling… / embedding 40%). */
-const _INFLIGHT=["pending","queued","fetching","sampling","embedding"];
+/* Terminal, not in-flight: a source is still processing unless it has finished
+   one way or another. Listing the in-flight stages instead would need updating
+   for every new source kind — a paper parses where a video samples — and
+   forgetting one stops the refresher while the row is still moving. Same
+   inversion as NOT_INFLIGHT_STATUSES on the server, for the same reason. */
+const _TERMINAL=["indexed","skipped","failed"];
 let _refresher=null;
 function startRefresher(){
   if(_refresher) return;
   _refresher=setInterval(async()=>{
     const videos=await loadVideos();
-    if(!videos || !videos.some(v=>_INFLIGHT.includes(v.status))){
+    if(!videos || !videos.some(v=>!_TERMINAL.includes(v.status))){
       clearInterval(_refresher); _refresher=null;
       $("#ingestStatus").textContent="";
     }

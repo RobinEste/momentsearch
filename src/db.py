@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS ms_videos (
     title        TEXT,
     status       TEXT NOT NULL DEFAULT 'pending',
     error        TEXT,
-    frame_count  INT,
+    frame_count  INT,                         -- also the chunk count for documents
     progress     REAL,                       -- 0..1 within the current stage
     attempts     INT NOT NULL DEFAULT 0,
     embed_version TEXT,

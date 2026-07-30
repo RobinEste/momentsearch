@@ -147,7 +147,7 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
     # order (src/dispatcher.py). FIFO mode: enqueue to Prefect immediately.
     if config.ENABLE_FAIR_DISPATCH:
         return {"video_id": row["id"], "status": "pending"}
-    flow_run_id = jobs.enqueue_video(row["id"], uid)
+    flow_run_id = jobs.enqueue(row["id"], uid, row["kind"])
     return {"video_id": row["id"], "status": row["status"], "flow_run_id": flow_run_id}
 
 
@@ -186,7 +186,7 @@ def retry(video_id: str, uid: str = Depends(user_id)):
     db.set_status(video_id, "pending", error=None)
     if config.ENABLE_FAIR_DISPATCH:
         return {"video_id": video_id, "status": "pending"}  # dispatcher re-admits it fairly
-    flow_run_id = jobs.enqueue_video(video_id, uid)
+    flow_run_id = jobs.enqueue(video_id, uid, row["kind"])
     return {"video_id": video_id, "status": "pending", "flow_run_id": flow_run_id}
 
 
