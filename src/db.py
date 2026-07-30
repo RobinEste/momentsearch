@@ -1,8 +1,16 @@
-"""Postgres (Neon) access layer — the videos manifest, source of truth.
+"""Postgres (Neon) access layer — the source manifest, source of truth.
 
-One row per (user's) video; `status` tracks the ingest lifecycle:
+One row per (user's) source, of any kind; `status` tracks the ingest lifecycle:
 pending -> fetching -> sampling -> embedding -> indexed | skipped | failed
 (skipped = duplicate (user_id, source_hash); indexed = searchable in Qdrant).
+The middle stages are per kind — a paper parses and chunks where a video samples
+frames — so only the ends of that line are shared. What counts as "still
+in flight" is therefore derived, not listed: see NOT_INFLIGHT_STATUSES.
+
+The table is still named ms_videos and the id column is still used as the
+generic source id, even though papers and decks live here too. Renaming both
+would touch the search and cleanup paths that non-negotiable 6 protects, for no
+functional gain during this assignment. Flagged as future cleanup.
 """
 from __future__ import annotations
 
@@ -12,7 +20,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from .config import DATABASE_URL, INFLIGHT_STATUSES
+from .config import DATABASE_URL, NOT_INFLIGHT_STATUSES
 
 _pool: ConnectionPool | None = None
 _pool_pid: int | None = None
@@ -36,8 +44,9 @@ def pool() -> ConnectionPool:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ms_videos (
-    id           TEXT PRIMARY KEY,           -- yt_<id> | up_<uuid>
+    id           TEXT PRIMARY KEY,           -- yt_<id> | up_<uuid> | doc_<uuid>
     user_id      TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'video',  -- video | paper | deck
     source       TEXT NOT NULL,              -- youtube | upload
     url          TEXT,                       -- YouTube URL (source=youtube)
     storage_key  TEXT,                       -- uploads/<user>/<id>.<ext> (source=upload)
@@ -55,6 +64,16 @@ CREATE TABLE IF NOT EXISTS ms_videos (
 CREATE INDEX IF NOT EXISTS ms_videos_user_idx   ON ms_videos (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ms_videos_status_idx ON ms_videos (status);
 CREATE INDEX IF NOT EXISTS ms_videos_hash_idx   ON ms_videos (user_id, source_hash);
+
+-- Additive migrations, for databases that predate a column. CREATE TABLE IF NOT
+-- EXISTS above is a no-op on a table that already exists: it does not reconcile
+-- the definition (measured, not assumed). So every column added after the first
+-- deploy needs its own idempotent ALTER here too, and the two must stay in sync
+-- — the CREATE describes a fresh database, the ALTER brings an existing one to
+-- the same shape. NOT NULL together with DEFAULT is what makes it safe: it
+-- backfills the rows that are already there in the same statement, which is the
+-- data migration one would otherwise hand-write.
+ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'video';
 
 -- Bring-your-own-model: a tenant's hosted LLM endpoint (vLLM / Ollama / any
 -- OpenAI-compatible server, NVIDIA NIM, or Anthropic). When a row exists the
@@ -178,11 +197,17 @@ def delete_video(video_id: str) -> None:
 # ── Fair scheduling (WFQ) ────────────────────────────────────────────────────
 
 def count_inflight() -> int:
-    """How many videos currently occupy execution capacity (scheduled/running)."""
+    """How many sources currently occupy execution capacity (scheduled/running).
+
+    Asked as "not waiting and not finished" rather than "in one of these stages",
+    so a stage name this function has never heard of still counts. Equivalent to
+    the old enumeration for every existing video status; it differs only for
+    names that did not exist yet.
+    """
     with pool().connection() as conn:
         row = conn.execute(
-            "SELECT count(*) AS n FROM ms_videos WHERE status = ANY(%s)",
-            (list(INFLIGHT_STATUSES),),
+            "SELECT count(*) AS n FROM ms_videos WHERE status <> ALL(%s)",
+            (list(NOT_INFLIGHT_STATUSES),),
         ).fetchone()
     return row["n"] if row else 0
 
