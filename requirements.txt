@@ -28,4 +28,4 @@ yt-dlp>=2026.7.4
 
 # Bring-your-own multimodal LLM (optional providers; install what you use)
 openai>=1.30
-# anthropic>=0.25   # uncomment for LLM_PROVIDER=anthropic
+anthropic>=0.25     # LLM_PROVIDER=anthropic

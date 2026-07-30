@@ -2,10 +2,36 @@
 # (DATABASE_URL), object storage, Qdrant Cloud, Prefect Cloud for the work
 # queue — so every container here is stateless and disposable.
 #   docker compose up --build
-#   API + UI:        http://localhost:8000
+#   API + UI:        http://localhost:8100
 #   Run/queue view:  https://app.prefect.cloud -> Runs
 # Vector store is Qdrant Cloud via QDRANT_URL in .env. To run a local Qdrant
 # instead, add a qdrant service here and blank QDRANT_URL.
+# Config reaches the containers two ways, in this order of precedence:
+#   1. `environment` below — bare names are taken from the shell that ran
+#      `docker compose`, so a secret manager wrapping the command works:
+#          infisical run --env=dev --path=/a3 -- docker compose up
+#      A name that is unset in the shell is simply not passed through.
+#   2. `env_file: .env` — the documented fallback from .env.example, for a
+#      fresh clone with no secret manager. Marked optional so the stack also
+#      starts when no .env exists.
+x-app-env: &app-env
+  - CLIP_SERVICE_URL=${CLIP_SERVICE_URL:-http://clip:8001}
+  # One worker process executes up to WORKER_CONCURRENCY runs at once. With the
+  # clip service doing the embedding, each run is light (download + ffmpeg
+  # only) — raise this without adding RAM for models.
+  - WORKER_CONCURRENCY=2
+  - DATABASE_URL
+  - ADMIN_TOKEN
+  - LLM_PROVIDER
+  - LLM_API_KEY
+  - LLM_MODEL
+  - QDRANT_URL
+  - QDRANT_API_KEY
+  - QDRANT_COLLECTION
+  - PREFECT_API_URL
+  - PREFECT_API_KEY
+  - SEED_SAMPLE_VIDEOS
+
 services:
   # The inference service: ONE warm CLIP model behind a URL. api + worker send
   # batches here instead of each flow run paying a fresh ~15-30s model load.
@@ -14,7 +40,9 @@ services:
   clip:
     build: .
     command: uvicorn src.clip_service:app --host 0.0.0.0 --port 8001
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - hf_cache:/root/.cache     # model weights cached across restarts
     restart: unless-stopped
@@ -28,9 +56,10 @@ services:
   seed:
     build: .
     command: python -m src.seed
-    env_file: .env
-    environment:
-      CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-env
     volumes:
       - ./data:/app/data
       - hf_cache:/root/.cache
@@ -41,10 +70,13 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
-    env_file: .env
-    environment:
-      CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
+      # 8100 outside: the assignment's README curls and benchmark/bench.py
+      # both default to localhost:8100. Container stays on 8000.
+      - "8100:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-env
     volumes:
       - ./data:/app/data          # STORAGE_PROVIDER=local only (dev)
       - hf_cache:/root/.cache
@@ -58,13 +90,10 @@ services:
   worker:
     build: .
     command: python -m src.worker
-    env_file: .env
-    environment:
-      CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
-      # One worker process executes up to WORKER_CONCURRENCY runs at once.
-      # With the clip service doing the embedding, each run is light
-      # (download + ffmpeg only) — raise this without adding RAM for models.
-      WORKER_CONCURRENCY: 2
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-env
     volumes:
       - ./data:/app/data
       - hf_cache:/root/.cache

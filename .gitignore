@@ -11,6 +11,8 @@ env/
 .env
 .env.*
 !.env.example
+# local secret-manager binding, not part of the project
+.infisical.json
 
 # Runtime data (videos, extracted frames, qdrant storage)
 data/
@@ -25,9 +27,6 @@ qdrant_storage/
 # Node / frontend
 node_modules/
 dist/
-
-# Benchmark
-benchmark/
 
 # Internal design notes (not published)
 MULTIMODAL_RETRIEVAL.md
