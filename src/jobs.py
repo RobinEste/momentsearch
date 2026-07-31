@@ -1,18 +1,25 @@
 """Prefect Cloud trigger layer — the API schedules runs, workers execute them.
 
-One flow per source kind ("ms-ingest-video", "ms-ingest-paper" — the "ms-"
-prefix keeps them distinct from the digital-twin-akash flow living in the same
-Prefect workspace), each served as an "ingest" deployment by worker.py. The API
+One flow per source kind ("ms-ingest-video", "ms-ingest-paper", "ms-ingest-deck"
+— the "ms-" prefix keeps them distinct from the digital-twin-akash flow living
+in the same Prefect workspace), each served as an "ingest" deployment by
+worker.py; the authoritative list is INGEST_DEPLOYMENTS below. The API
 never imports a pipeline or its heavy deps (torch, ffmpeg) — it just asks
 Prefect Cloud to schedule a run; any live worker picks it up. Retries/backoff
 live on the flows' tasks (src/ingest/); failed runs are visible + retryable in
 the Prefect Cloud UI.
 
-INGEST_DEPLOYMENTS is the single source of truth for which kinds can run at all.
-The dispatcher reads it to decide what to admit, so a kind whose flow does not
-exist yet waits as `pending` instead of being handed to the wrong flow. Keeping
-that list here rather than in config means adding a source type is one edit
-instead of two that have to agree.
+INGEST_DEPLOYMENTS is the single source of truth for which kinds can *run*. The
+dispatcher reads it to decide what to admit, so a kind whose flow does not exist
+yet waits as `pending` instead of being handed to the wrong flow.
+
+It is not the source of truth for everything else about a kind: registration
+validates against DOC_KINDS (api/admin.py), the chunk floor lives with the
+chunker, and the citation locator with the search layer. Adding "deck" touched
+all four. A kinds table would collapse them, and the reason there isn't one is
+that at three kinds the guarded duplicates fail loudly (worker.py's
+_check_deployments_match, a 400 at registration) — only the chunk floor and the
+locator fail silently. Revisit when a fourth kind arrives.
 """
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ from prefect.deployments import run_deployment
 INGEST_DEPLOYMENTS = {
     "video": "ms-ingest-video/ingest",
     "paper": "ms-ingest-paper/ingest",
+    "deck": "ms-ingest-deck/ingest",
 }
 
 

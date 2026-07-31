@@ -2,11 +2,11 @@
 
     python -m src.worker
 
-serve() registers the "ms-ingest-video/ingest" and "ms-ingest-paper/ingest"
-deployments in Prefect Cloud (idempotent) and long-polls for scheduled runs —
-outbound HTTPS only, no ports. Scale horizontally by running more replicas of
-this process; each executes up to WORKER_CONCURRENCY runs at once, shared
-across both deployments — capacity belongs to the machine, not to a source type.
+serve() registers one "<flow name>/ingest" deployment per entry in FLOWS below
+in Prefect Cloud (idempotent) and long-polls for scheduled runs — outbound HTTPS
+only, no ports. Scale horizontally by running more replicas of this process;
+each executes up to WORKER_CONCURRENCY runs at once, shared across every
+deployment — capacity belongs to the machine, not to a source type.
 
 Sample seeding is NOT done here — it's a one-shot startup gate (seed.py /
 src/seeding.py) that the whole stack waits on, so the app never serves a
@@ -23,6 +23,7 @@ from prefect.deployments.runner import EntrypointType
 
 from . import jobs
 from .db import init_schema
+from .ingest.deck import ingest_deck
 from .ingest.paper import ingest_paper
 from .ingest.pipeline import ingest_video
 
@@ -33,7 +34,7 @@ from .ingest.pipeline import ingest_video
 # boot failure. Without that check, a kind added to jobs.INGEST_DEPLOYMENTS but
 # forgotten here would be claimed by the dispatcher, fail to enqueue, get put
 # back to `pending`, and be claimed again — a silent loop every tick.
-FLOWS = {"video": ingest_video, "paper": ingest_paper}
+FLOWS = {"video": ingest_video, "paper": ingest_paper, "deck": ingest_deck}
 
 
 def _check_deployments_match() -> None:
@@ -62,8 +63,12 @@ def main():
     # retry forever so a blip pauses ingest instead of killing the worker.
     while True:
         try:
-            print("[worker] serving deployments 'ms-ingest-video/ingest' and "
-                  f"'ms-ingest-paper/ingest' (shared concurrency {limit})")
+            # Derived from FLOWS rather than spelled out: a hardcoded list is a
+            # fourth place that has to agree with the other three, and the one
+            # place a disagreement would NOT be caught by the check above.
+            names = ", ".join(sorted(f"{flow.name}/ingest" for flow in FLOWS.values()))
+            print(f"[worker] serving deployments {names} "
+                  f"(shared concurrency {limit})")
             # MODULE_PATH, not the default FILE_PATH. serve() re-imports the
             # flow in the run subprocess, and a file-path entrypoint executes
             # src/ingest/paper.py as a standalone script — at which point

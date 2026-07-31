@@ -95,6 +95,13 @@ def _deeplink(video: dict | None, video_id: str, ms: int) -> str:
     return f"/api/video/{video_id}#t={secs}"
 
 
+def _doc_locator(kind: str, page: int) -> str:
+    """A deck says "slide 3" where a paper says "p. 3" — same `page` payload
+    field, different noun. Only the label is per-kind, so only the label
+    branches, here, once."""
+    return f"slide {page}" if kind == "deck" else f"p. {page}"
+
+
 def _doc_deeplink(source: dict | None, page: int) -> str | None:
     """A page anchor on the document's own URL. `#page=N` is the PDF open
     parameter, so browsers and viewers really do jump there — the rubric asks
@@ -197,7 +204,7 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
                 "timestamp": None,
                 "page": page,
                 "section": (tx or {}).get("section"),
-                "locator": f"p. {page}",
+                "locator": _doc_locator(kind, page),
                 "idx": None,
                 "thumbnail": None,
                 "media_url": None,

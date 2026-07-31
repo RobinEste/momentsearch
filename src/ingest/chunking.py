@@ -38,6 +38,18 @@ CHUNK_TARGET_CHARS = 1400   # ~350 tokens at the measured 4.0 chars/token
 CHUNK_MAX_CHARS = 1500      # hard ceiling: <=500 tokens even at 3.0 chars/token
 CHUNK_OVERLAP_CHARS = 140   # 10%, so a sentence split across chunks survives once
 MIN_CHUNK_CHARS = 80        # below this it is a stray caption, not an answer
+# Slides are not pages. The 80-character floor above is a paper heuristic: in
+# running prose a fragment that short is a figure label or a stray header, so
+# dropping it removes noise. A slide reading "Scaling ingest to 40 documents" is
+# 31 characters and is the whole point of that slide — apply the paper floor to a
+# deck and every title-and-three-bullets slide silently leaves the index, while
+# the deck still reports itself `indexed`. The floor that remains is there to
+# drop what genuinely cannot answer anything: "Q&A", "Thanks!", a bare number.
+#
+# A chunk this short still embeds usefully because it is not embedded alone —
+# `context_line` prepends the deck title and slide number, which is most of the
+# semantic anchor for a slide whose own text is a headline.
+SLIDE_MIN_CHUNK_CHARS = 20
 _MAX_VERIFY_ROUNDS = 4      # bounded: degrade into smaller chunks, never hang
 
 _PARAGRAPH_RE = re.compile(r"\n\s*\n")
@@ -88,14 +100,18 @@ def _units(text: str) -> list[str]:
     return units
 
 
-def chunk_text(text: str) -> list[str]:
+def chunk_text(text: str, *, min_chars: int = MIN_CHUNK_CHARS) -> list[str]:
     """One page (or slide) of text -> chunks, greedily packed to the target size.
 
     Returns [] for text that holds nothing worth retrieving, which is a normal
     outcome for a title page or an image-only slide, not an error.
+
+    `min_chars` is the noise floor; decks pass SLIDE_MIN_CHUNK_CHARS. Only the
+    floor is per-kind — target, ceiling and overlap are properties of the
+    embedding model, which does not care what it is reading.
     """
     text = (text or "").strip()
-    if len(text) < MIN_CHUNK_CHARS:
+    if len(text) < min_chars:
         return []
 
     chunks: list[str] = []
@@ -120,7 +136,7 @@ def chunk_text(text: str) -> list[str]:
     result: list[str] = []
     for chunk in chunks:
         if len(chunk) <= CHUNK_MAX_CHARS:
-            if len(chunk.strip()) >= MIN_CHUNK_CHARS:
+            if len(chunk.strip()) >= min_chars:
                 result.append(chunk.strip())
             continue
         # Every part of an over-long chunk is kept, however short the last one
