@@ -1,11 +1,12 @@
-"""Ingest worker entrypoint — serves the Prefect flow.
+"""Ingest worker entrypoint — serves the Prefect flows.
 
     python -m src.worker
 
-flow.serve() registers the "ms-ingest-video/ingest" deployment in Prefect Cloud
-(idempotent) and long-polls for scheduled runs — outbound HTTPS only, no
-ports. Scale horizontally by running more replicas of this process; each
-executes up to WORKER_CONCURRENCY runs at once.
+serve() registers one "<flow name>/ingest" deployment per entry in FLOWS below
+in Prefect Cloud (idempotent) and long-polls for scheduled runs — outbound HTTPS
+only, no ports. Scale horizontally by running more replicas of this process;
+each executes up to WORKER_CONCURRENCY runs at once, shared across every
+deployment — capacity belongs to the machine, not to a source type.
 
 Sample seeding is NOT done here — it's a one-shot startup gate (seed.py /
 src/seeding.py) that the whole stack waits on, so the app never serves a
@@ -17,11 +18,38 @@ Embedding goes to the warm CLIP service when CLIP_SERVICE_URL is set
 import os
 import time
 
+from prefect import serve
+from prefect.deployments.runner import EntrypointType
+
+from . import jobs
 from .db import init_schema
+from .ingest.deck import ingest_deck
+from .ingest.paper import ingest_paper
 from .ingest.pipeline import ingest_video
+
+# The flows themselves cannot live in jobs.py: the API imports that module, and
+# importing a flow drags torch and pypdfium2 into the API process. So the kind ->
+# flow mapping lives here and the kind -> deployment-name mapping lives there,
+# and _check_deployments_match() below makes a disagreement between them a loud
+# boot failure. Without that check, a kind added to jobs.INGEST_DEPLOYMENTS but
+# forgotten here would be claimed by the dispatcher, fail to enqueue, get put
+# back to `pending`, and be claimed again — a silent loop every tick.
+FLOWS = {"video": ingest_video, "paper": ingest_paper, "deck": ingest_deck}
+
+
+def _check_deployments_match() -> None:
+    served = {f"{flow.name}/ingest" for flow in FLOWS.values()}
+    declared = set(jobs.INGEST_DEPLOYMENTS.values())
+    if served != declared or set(FLOWS) != set(jobs.INGEST_DEPLOYMENTS):
+        raise RuntimeError(
+            "worker.FLOWS and jobs.INGEST_DEPLOYMENTS disagree: "
+            f"serving {sorted(served)} for kinds {sorted(FLOWS)}, "
+            f"but jobs declares {sorted(declared)} for kinds "
+            f"{sorted(jobs.INGEST_DEPLOYMENTS)}")
 
 
 def main():
+    _check_deployments_match()
     init_schema()  # make sure migrations ran before consuming runs
     from .rag import vector_store
     vector_store.ensure_collection()  # up front, not mid-first-ingest
@@ -35,8 +63,22 @@ def main():
     # retry forever so a blip pauses ingest instead of killing the worker.
     while True:
         try:
-            print(f"[worker] serving deployment 'ms-ingest-video/ingest' (concurrency {limit})")
-            ingest_video.serve(name="ingest", limit=limit)
+            # Derived from FLOWS rather than spelled out: a hardcoded list is a
+            # fourth place that has to agree with the other three, and the one
+            # place a disagreement would NOT be caught by the check above.
+            names = ", ".join(sorted(f"{flow.name}/ingest" for flow in FLOWS.values()))
+            print(f"[worker] serving deployments {names} "
+                  f"(shared concurrency {limit})")
+            # MODULE_PATH, not the default FILE_PATH. serve() re-imports the
+            # flow in the run subprocess, and a file-path entrypoint executes
+            # src/ingest/paper.py as a standalone script — at which point
+            # `from .. import config, db` raises "attempted relative import
+            # beyond top-level package". A module entrypoint
+            # (src.ingest.paper:ingest_paper) keeps the package context.
+            serve(*[flow.to_deployment(name="ingest",
+                                       entrypoint_type=EntrypointType.MODULE_PATH)
+                    for flow in FLOWS.values()],
+                  limit=limit, print_starting_message=False)
             break  # clean shutdown
         except KeyboardInterrupt:
             break

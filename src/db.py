@@ -1,8 +1,16 @@
-"""Postgres (Neon) access layer — the videos manifest, source of truth.
+"""Postgres (Neon) access layer — the source manifest, source of truth.
 
-One row per (user's) video; `status` tracks the ingest lifecycle:
+One row per (user's) source, of any kind; `status` tracks the ingest lifecycle:
 pending -> fetching -> sampling -> embedding -> indexed | skipped | failed
 (skipped = duplicate (user_id, source_hash); indexed = searchable in Qdrant).
+The middle stages are per kind — a paper parses and chunks where a video samples
+frames — so only the ends of that line are shared. What counts as "still
+in flight" is therefore derived, not listed: see NOT_INFLIGHT_STATUSES.
+
+The table is still named ms_videos and the id column is still used as the
+generic source id, even though papers and decks live here too. Renaming both
+would touch the search and cleanup paths that non-negotiable 6 protects, for no
+functional gain during this assignment. Flagged as future cleanup.
 """
 from __future__ import annotations
 
@@ -12,7 +20,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from .config import DATABASE_URL, INFLIGHT_STATUSES
+from .config import DATABASE_URL, NOT_INFLIGHT_STATUSES
 
 _pool: ConnectionPool | None = None
 _pool_pid: int | None = None
@@ -36,8 +44,12 @@ def pool() -> ConnectionPool:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ms_videos (
-    id           TEXT PRIMARY KEY,           -- yt_<id> | up_<uuid>
+    -- yt_<youtube id> | up_<uuid> | doc_<hash of kind + normalized uri>. The
+    -- document form is deterministic on purpose: re-registering the same source
+    -- updates its row instead of adding a near-duplicate.
+    id           TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'video',  -- video | paper | deck
     source       TEXT NOT NULL,              -- youtube | upload
     url          TEXT,                       -- YouTube URL (source=youtube)
     storage_key  TEXT,                       -- uploads/<user>/<id>.<ext> (source=upload)
@@ -45,7 +57,7 @@ CREATE TABLE IF NOT EXISTS ms_videos (
     title        TEXT,
     status       TEXT NOT NULL DEFAULT 'pending',
     error        TEXT,
-    frame_count  INT,
+    frame_count  INT,                         -- also the chunk count for documents
     progress     REAL,                       -- 0..1 within the current stage
     attempts     INT NOT NULL DEFAULT 0,
     embed_version TEXT,
@@ -55,6 +67,16 @@ CREATE TABLE IF NOT EXISTS ms_videos (
 CREATE INDEX IF NOT EXISTS ms_videos_user_idx   ON ms_videos (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ms_videos_status_idx ON ms_videos (status);
 CREATE INDEX IF NOT EXISTS ms_videos_hash_idx   ON ms_videos (user_id, source_hash);
+
+-- Additive migrations, for databases that predate a column. CREATE TABLE IF NOT
+-- EXISTS above is a no-op on a table that already exists: it does not reconcile
+-- the definition (measured, not assumed). So every column added after the first
+-- deploy needs its own idempotent ALTER here too, and the two must stay in sync
+-- — the CREATE describes a fresh database, the ALTER brings an existing one to
+-- the same shape. NOT NULL together with DEFAULT is what makes it safe: it
+-- backfills the rows that are already there in the same statement, which is the
+-- data migration one would otherwise hand-write.
+ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'video';
 
 -- Bring-your-own-model: a tenant's hosted LLM endpoint (vLLM / Ollama / any
 -- OpenAI-compatible server, NVIDIA NIM, or Anthropic). When a row exists the
@@ -75,13 +97,24 @@ def init_schema() -> None:
         conn.execute(SCHEMA)
 
 
-def upsert_pending(video: dict[str, Any]) -> dict:
-    """Insert a video as pending; re-submitting an existing id resets it."""
+def upsert_pending(source: dict[str, Any]) -> dict:
+    """Insert a source as pending; re-submitting an existing id resets it.
+
+    `kind` is a required key with no Python-side default, on purpose. The column
+    defaults to 'video', so a caller that omits it would file a paper as a video
+    silently — the loud KeyError from psycopg is the better outcome.
+
+    ON CONFLICT deliberately leaves `kind` alone, and that is only safe because
+    every id carries its kind: yt_/up_ are videos by construction, and a doc_ id
+    hashes the kind together with the URI (see api/admin.py::_document_id). A
+    re-submission therefore always lands on a row of the same kind. Drop that
+    property and this clause starts silently ignoring a corrected kind.
+    """
     with pool().connection() as conn:
         row = conn.execute(
             """
-            INSERT INTO ms_videos (id, user_id, source, url, storage_key, source_hash, title, status)
-            VALUES (%(id)s, %(user_id)s, %(source)s, %(url)s, %(storage_key)s,
+            INSERT INTO ms_videos (id, user_id, kind, source, url, storage_key, source_hash, title, status)
+            VALUES (%(id)s, %(user_id)s, %(kind)s, %(source)s, %(url)s, %(storage_key)s,
                     %(source_hash)s, %(title)s, 'pending')
             ON CONFLICT (id) DO UPDATE SET
                 url = COALESCE(EXCLUDED.url, ms_videos.url),
@@ -91,7 +124,7 @@ def upsert_pending(video: dict[str, Any]) -> dict:
                 status = 'pending', error = NULL, progress = NULL, updated_at = now()
             RETURNING *
             """,
-            video,
+            source,
         ).fetchone()
     return row
 
@@ -137,16 +170,25 @@ def get_video(video_id: str) -> dict | None:
         return conn.execute("SELECT * FROM ms_videos WHERE id = %s", (video_id,)).fetchone()
 
 
-def find_duplicate(user_id: str, source_hash: str, exclude_id: str) -> dict | None:
-    """An already-indexed video with the same content for the same user."""
+def find_duplicate(user_id: str, source_hash: str, exclude_id: str,
+                   kind: str) -> dict | None:
+    """An already-indexed source of the SAME KIND with the same content.
+
+    Scoped by kind because identical bytes can be two legitimate sources: the
+    same PDF ingested as a paper (page locators, text route) and as a deck
+    (slide locators, its own route) are different products of the same file.
+    Without this filter the second one is silently marked 'skipped' as a
+    duplicate of the first, and never gets indexed at all.
+    """
     with pool().connection() as conn:
         return conn.execute(
             """
             SELECT * FROM ms_videos
-            WHERE user_id = %s AND source_hash = %s AND id <> %s AND status = 'indexed'
+            WHERE user_id = %s AND source_hash = %s AND id <> %s AND kind = %s
+              AND status = 'indexed'
             LIMIT 1
             """,
-            (user_id, source_hash, exclude_id),
+            (user_id, source_hash, exclude_id, kind),
         ).fetchone()
 
 
@@ -178,26 +220,38 @@ def delete_video(video_id: str) -> None:
 # ── Fair scheduling (WFQ) ────────────────────────────────────────────────────
 
 def count_inflight() -> int:
-    """How many videos currently occupy execution capacity (scheduled/running)."""
+    """How many sources currently occupy execution capacity (scheduled/running).
+
+    Asked as "not waiting and not finished" rather than "in one of these stages",
+    so a stage name this function has never heard of still counts. Equivalent to
+    the old enumeration for every existing video status; it differs only for
+    names that did not exist yet.
+    """
     with pool().connection() as conn:
         row = conn.execute(
-            "SELECT count(*) AS n FROM ms_videos WHERE status = ANY(%s)",
-            (list(INFLIGHT_STATUSES),),
+            "SELECT count(*) AS n FROM ms_videos WHERE status <> ALL(%s)",
+            (list(NOT_INFLIGHT_STATUSES),),
         ).fetchone()
     return row["n"] if row else 0
 
 
-def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending videos in FAIR (round-robin across
+def wfq_claim(limit: int, kinds: tuple[str, ...]) -> list[dict]:
+    """Atomically claim up to `limit` pending sources in FAIR (round-robin across
     users) order, flipping them pending -> queued. Returns the claimed rows.
 
-    Fairness: rank each user's pending videos by age (row_number partitioned by
+    Fairness: rank each user's pending sources by age (row_number partitioned by
     user_id), then order by that rank first — so we take everyone's oldest, then
-    everyone's 2nd, ... A user who dumped 50 videos only gets one slot per round,
+    everyone's 2nd, ... A user who dumped 50 sources only gets one slot per round,
     exactly like the others. The UPDATE ... WHERE status='pending' RETURNING is
     the atomic claim: if two dispatchers race, each row is handed out once.
+
+    Fairness spans kinds: a bulk of papers and a queue of videos take turns in one
+    line, which is the point of admitting them from the same manifest. `kinds`
+    narrows that to the types an ingest flow actually exists for — a kind left out
+    stays `pending` instead of being handed to the wrong flow, and joins the line
+    for real the moment its flow lands.
     """
-    if limit <= 0:
+    if limit <= 0 or not kinds:
         return []
     with pool().connection() as conn:
         picked = conn.execute(
@@ -205,12 +259,12 @@ def wfq_claim(limit: int) -> list[dict]:
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending'
+                FROM ms_videos WHERE status = 'pending' AND kind = ANY(%s)
             ) t
             ORDER BY rn, id
             LIMIT %s
             """,
-            (limit,),
+            (list(kinds), limit),
         ).fetchall()
         ids = [r["id"] for r in picked]
         if not ids:
@@ -219,7 +273,7 @@ def wfq_claim(limit: int) -> list[dict]:
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
             WHERE id = ANY(%s) AND status = 'pending'
-            RETURNING id, user_id
+            RETURNING id, user_id, kind
             """,
             (ids,),
         ).fetchall()

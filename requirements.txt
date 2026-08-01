@@ -22,10 +22,16 @@ numpy>=1.24
 # Transcript (text) branch — bge semantic embeddings, ONNX (no torch), tiny
 fastembed>=0.3
 
+# Document parsing (paper + deck paths). PDFium from Chromium: C++ speed on a
+# path that shares CPU with search, page rendering for slides with no text
+# layer, and a permissive license — PyMuPDF is faster still but is
+# AGPL-or-commercial, which this Apache-2.0 fork should not inherit.
+pypdfium2>=5.0
+
 # Video acquisition (YouTube path). Keep this CURRENT — YouTube changes its
 # bot-detection constantly and old yt-dlp versions stop working first.
 yt-dlp>=2026.7.4
 
 # Bring-your-own multimodal LLM (optional providers; install what you use)
 openai>=1.30
-# anthropic>=0.25   # uncomment for LLM_PROVIDER=anthropic
+anthropic>=0.25     # LLM_PROVIDER=anthropic

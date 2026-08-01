@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+import urllib.request
 from pathlib import Path
 
 from .. import storage
@@ -36,6 +37,166 @@ def fetch_upload(storage_key: str, video_id: str) -> Path:
     suffix = Path(storage_key).suffix or ".mp4"
     dest = scratch_dir() / f"{video_id}{suffix}"
     return storage.download_to(storage_key, dest)
+
+
+_MAX_REDIRECTS = 5
+
+
+def _is_internal(address: str) -> bool:
+    """Is this IP inside our own network rather than out on the internet?"""
+    import ipaddress
+
+    ip = ipaddress.ip_address(address)
+    # An IPv4 address smuggled inside IPv6 notation (::ffff:169.254.169.254,
+    # 6to4, NAT64) has to be judged on the address it really means.
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _guard_url(url: str) -> None:
+    """Refuse a URL that resolves to an address inside our own network.
+
+    The document endpoint takes a URL from a user and this worker fetches it,
+    which is server-side request forgery by construction: without this check,
+    `http://169.254.169.254/...` reaches the cloud metadata service, and
+    `http://clip:8001/...` reaches a service that is not supposed to be public.
+    Registration cannot do this check — it must not touch the source at all, and
+    DNS can change between then and now — so it belongs here, at fetch time.
+
+    This is the cheap first pass, and on its own it is bypassable: it resolves
+    the name, and the socket layer resolves it again when connecting. A DNS
+    entry that answers differently to the two lookups (rebinding) walks straight
+    through. `_GuardedConnection` below closes that by checking the address the
+    socket ACTUALLY connected to; this function stays because a clear rejection
+    before any connection attempt is a better error than one halfway through.
+    """
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"Refusing to fetch a {parts.scheme or 'schemeless'} URL.")
+    host = parts.hostname
+    if not host:
+        raise ValueError("URL has no host.")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ValueError(f"Cannot resolve {host}: {exc}") from None
+    for info in infos:
+        if _is_internal(info[4][0]):
+            raise ValueError(f"Refusing to fetch {host}: resolves to {info[4][0]}, "
+                             "which is inside our own network.")
+
+
+class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
+    """Re-run the address check on every hop.
+
+    A redirect is a second URL the user controls indirectly, so validating only
+    the one they submitted checks the wrong thing. CPython already refuses to
+    redirect to anything but http/https/ftp; ftp is dropped here too, since this
+    opener has no handler for it and an internal FTP server is exactly the sort
+    of thing this guard exists for.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _guard_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _guarded_connection(base):
+    """Wrap an http.client connection class so it checks where it LANDED.
+
+    This is what closes DNS rebinding. `_guard_url` resolves the name, and the
+    socket resolves it again a moment later; a record with a one-second TTL can
+    answer "public" to the first and "127.0.0.1" to the second. Checking the
+    peer address after connect() catches that, and it runs before any request
+    bytes are written, so a rebound host gets no request at all — not even the
+    blind kind whose side effect is the whole point.
+    """
+    class _Guarded(base):
+        def connect(self):
+            super().connect()
+            peer = self.sock.getpeername()[0]
+            if _is_internal(peer):
+                self.close()
+                raise ValueError(f"Refusing to fetch {self.host}: connected to "
+                                 f"{peer}, which is inside our own network.")
+    return _Guarded
+
+
+def _safe_opener() -> urllib.request.OpenerDirector:
+    """An opener that speaks http(s) and nothing else.
+
+    urllib's default opener carries FileHandler, FTPHandler and DataHandler,
+    and `urlopen("file:///etc/hostname")` really does read that file [verified in
+    this image]. None of those belong on a path that fetches user-supplied URLs,
+    so the opener is built from the handlers we want instead of by subtraction.
+    """
+    import http.client
+
+    class _PinnedHTTP(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_guarded_connection(http.client.HTTPConnection), req)
+
+    class _PinnedHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_guarded_connection(http.client.HTTPSConnection), req,
+                                context=self._context)
+
+    opener = urllib.request.OpenerDirector()
+    for handler in (_PinnedHTTP(), _PinnedHTTPS(),
+                    urllib.request.HTTPErrorProcessor(), _GuardedRedirects()):
+        opener.add_handler(handler)
+    return opener
+
+
+def fetch_http(url: str, source_id: str, *, max_mb: int, suffix: str = ".pdf",
+               timeout: int = 120) -> Path:
+    """Download a document over http(s) into worker scratch.
+
+    Two properties matter more than they look:
+
+    * The destination path is derived from source_id, and an existing complete
+      file is reused instead of re-downloaded. That makes a second attempt after
+      a crash skip the network entirely, which is what "a completed stage is not
+      re-run" means for this stage. The YouTube path gets this for free from
+      yt-dlp; here it has to be written down.
+    * The download goes to a `.part` file and is renamed only once it finishes.
+      Without that, a process killed mid-download leaves a truncated file that
+      the reuse check above would happily treat as complete — trading one bug
+      for a quieter, worse one.
+    """
+    dest = scratch_dir() / f"{source_id}{suffix}"
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"[fetch] {source_id}: reusing {dest.name} ({dest.stat().st_size} bytes)")
+        return dest
+
+    _guard_url(url)
+    limit = max_mb * 1024 * 1024
+    part = dest.with_suffix(dest.suffix + ".part")
+    part.unlink(missing_ok=True)
+    # urllib's default User-Agent is refused by several publishers, arxiv.org
+    # among them.
+    request = urllib.request.Request(url, headers={"User-Agent": "momentsearch/1.0"})
+    size = 0
+    with _safe_opener().open(request, timeout=timeout) as response, \
+            part.open("wb") as out:
+        while chunk := response.read(1 << 16):
+            size += len(chunk)
+            if size > limit:
+                out.close()
+                part.unlink(missing_ok=True)
+                raise ValueError(f"Document exceeds the {max_mb}MB limit.")
+            out.write(chunk)
+    if size == 0:
+        part.unlink(missing_ok=True)
+        raise ValueError("Downloaded document is empty.")
+    part.rename(dest)
+    return dest
 
 
 _cookie_path: str | None = None

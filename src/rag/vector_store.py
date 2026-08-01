@@ -175,11 +175,21 @@ def search(vector: np.ndarray, user_id: str, *, top_k: int,
 # ── Transcript (text) branch ─────────────────────────────────────────────────
 
 def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
-                  payloads: list[dict[str, Any]]) -> None:
-    """Transcript chunks into the text collection. IDs are uuid5 of
-    '<video_id>:text:<i>' so re-runs overwrite, and never collide with frame ids."""
+                  payloads: list[dict[str, Any]], *, ns: str = "text",
+                  start: int = 0) -> None:
+    """Text chunks into the text collection. IDs are uuid5 of
+    '<video_id>:<ns>:<i>' so re-runs overwrite, and never collide with frame ids.
+
+    `ns` keeps the source types that share this collection in separate id
+    namespaces: transcript chunks are 'text', document pages are 'page'.
+
+    `start` offsets the index for callers that upsert in batches. Without it
+    every batch would restart at 0 and silently overwrite the previous one —
+    the kind of bug that shows up as "my document only has 64 chunks".
+    """
     points = [
-        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:text:{i}")),
+        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                         f"{video_id}:{ns}:{start + i}")),
                        vector=vec.tolist(), payload=payload)
         for i, (vec, payload) in enumerate(zip(vectors, payloads))
     ]

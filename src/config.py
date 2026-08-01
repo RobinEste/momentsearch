@@ -100,6 +100,9 @@ FRAME_KEY_PREFIX = "frames/"
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
 PRESIGN_GET_EXPIRY_S = _int("PRESIGN_GET_EXPIRY_S", 3600)  # thumbnails / playback
 MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 2048)                # register rejects bigger objects
+# Documents are two orders of magnitude smaller than video, and this cap is the
+# only thing standing between "a URL a user pasted" and the worker's disk.
+MAX_DOCUMENT_MB = _int("MAX_DOCUMENT_MB", 64)
 ALLOWED_UPLOAD_TYPES = ("video/",)                         # content-type must start with
 
 # --- Video ingest lifecycle ---------------------------------------------------
@@ -109,8 +112,19 @@ ALLOWED_UPLOAD_TYPES = ("video/",)                         # content-type must s
 # embedding = CLIP + Qdrant upsert; skipped = duplicate (user_id, source_hash).
 VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
                   "indexed", "skipped", "failed")
-# In-flight = occupying execution capacity (scheduled or running).
-INFLIGHT_STATUSES = ("queued", "fetching", "sampling", "embedding")
+# Other source kinds bring their own stage names (a paper parses and chunks, it
+# does not sample frames), so the tuple above is the VIDEO vocabulary, not the
+# whole set. Capacity accounting must not depend on knowing every stage name.
+#
+# Terminal = the row is done, whichever way it ended. `pending` is waiting, so
+# it costs nothing either. Everything else occupies execution capacity, by
+# definition rather than by enumeration: a new per-kind stage is then counted
+# and reapable the moment it exists, instead of silently escaping both. The
+# failure direction flips with it — an unknown status now over-counts (admit a
+# little less) instead of under-counting (over-admit, and a stuck row that no
+# reaper can see).
+TERMINAL_STATUSES = ("indexed", "skipped", "failed")
+NOT_INFLIGHT_STATUSES = ("pending",) + TERMINAL_STATUSES
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

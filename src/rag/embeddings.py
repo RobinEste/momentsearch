@@ -106,6 +106,57 @@ def embed_query_local(text: str) -> np.ndarray:
     return np.asarray(vec, dtype=np.float32)
 
 
+_DEFAULT_TEXT_TOKEN_LIMIT = 512
+
+
+@lru_cache
+def _tokenizer_and_limit():
+    """An INDEPENDENT copy of the text model's tokenizer, for counting only.
+
+    The copy is the whole point. Counting needs truncation and padding off,
+    while embedding needs both on, and they share a process inside the clip
+    service. Disabling them on the model's own tokenizer silently breaks
+    embedding: every sequence keeps its true length, numpy can no longer build a
+    rectangular batch, and /embed/docs answers 500 with "inhomogeneous shape".
+    Measuring must not change what it measures.
+
+    Both defaults would corrupt the count, in opposite directions and both
+    quietly. Truncation makes every over-long input report exactly the limit,
+    which looks like a measurement but is the ceiling staring back at you.
+    Padding makes encode_batch pad every sequence to the longest in the batch,
+    so all counts come back equal to the largest — the tell is a median that
+    equals the maximum.
+
+    Returns (tokenizer, limit) together: the limit has to be read from the
+    ORIGINAL before copying, since that is where the truncation config lives, so
+    the two values are produced by the same step and cached as one.
+    """
+    from tokenizers import Tokenizer
+
+    original = _text_model().model.tokenizer
+    limit = int((original.truncation or {}).get(
+        "max_length", _DEFAULT_TEXT_TOKEN_LIMIT))
+    counting = Tokenizer.from_str(original.to_str())
+    counting.no_truncation()
+    counting.no_padding()
+    return counting, limit
+
+
+def text_token_limit() -> int:
+    """Where the text model truncates, taken from the tokenizer's own truncation
+    config rather than from a model card, so it cannot drift from reality."""
+    return _tokenizer_and_limit()[1]
+
+
+def count_tokens_local(texts: list[str]) -> list[int]:
+    """True token counts for the text model — the chunker's safety check."""
+    if not texts:
+        return []
+    tokenizer, _ = _tokenizer_and_limit()
+    with _lock:
+        return [len(enc.ids) for enc in tokenizer.encode_batch(texts)]
+
+
 # ── OpenAI / OpenAI-compatible text embeddings (TEXT_EMBED_PROVIDER=openai) ────
 # Hosted alternative to bge for the transcript branch. Reuses the OpenAI client
 # (already a dependency for the LLM), so one OpenAI key powers both the answer
@@ -194,3 +245,22 @@ def embed_query(text: str) -> np.ndarray:
         vec = _post("/embed/query", {"text": text}, timeout=60)["vector"]
         return np.asarray(vec, dtype=np.float32)
     return embed_query_local(text)
+
+
+def count_tokens(texts: list[str]) -> tuple[list[int], int] | None:
+    """(counts, limit) for the text model, or None when it cannot be known here.
+
+    Used by the chunker to guarantee no chunk is silently truncated. Returns
+    None for the OpenAI provider on purpose: its limit (thousands of tokens) is
+    nowhere near our chunk sizes, and guessing a count with the wrong tokenizer
+    would be worse than admitting we do not measure it.
+
+    Call it with a non-empty list: an empty one would pay for a network call or
+    a model load to learn nothing.
+    """
+    if config.TEXT_EMBED_PROVIDER == "openai":
+        return None
+    if config.CLIP_SERVICE_URL:
+        out = _post("/count_tokens", {"texts": texts})
+        return out["counts"], int(out["limit"])
+    return count_tokens_local(texts), text_token_limit()

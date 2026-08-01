@@ -5,6 +5,15 @@ This product includes software developed at Traversaal.ai (https://traversaal.ai
 
 Licensed under the Apache License, Version 2.0. See the LICENSE file.
 
+This fork additionally contains course-provided evaluation material, kept here
+so the harness runs against the repository it grades: benchmark/, eval/ and
+.claude/skills/fde-momentsearch-scaled-eval/ come from the FDE Bootcamp
+(hamzafarooq/multi-agent-course, FDE/Assignment_3_Moment_Search_Scaled). That
+repository carries no license file, so those files are NOT covered by the
+Apache 2.0 license above and remain the property of their author. Everything
+outside those three paths is either upstream MomentSearch or this fork's own
+assignment work.
+
 This project depends on third-party open-source software, including but not
 limited to: FastAPI, Qdrant, sentence-transformers / OpenCLIP, PyTorch,
 yt-dlp, and FFmpeg. Each is distributed under its own license. MomentSearch

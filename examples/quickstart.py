@@ -83,8 +83,11 @@ def ask(question: str) -> None:
         print(f"   💬 {result['answer']}")
     for c in result["citations"]:
         title = (c.get("title") or c["video_id"])[:48]
-        print(f"   [{c['n']}] {c['timestamp']}  score={c['score']}  {title}")
-        print(f"        ↳ {c['deeplink']}")
+        # The locator's label, not `timestamp`: a paper cites "p. 4" and a deck
+        # "slide 7", and both leave `timestamp` None. One name that every source
+        # kind answers to.
+        print(f"   [{c['n']}] {c['locator']['label']}  score={c['score']}  {title}")
+        print(f"        ↳ {c['deeplink'] or '(no public link)'}")
 
 
 def main() -> None:

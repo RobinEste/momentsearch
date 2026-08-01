@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -117,11 +118,21 @@ class RegisterRequest(BaseModel):
 @router.post("", status_code=202, dependencies=[Depends(require_auth)])
 def register(req: RegisterRequest, uid: str = Depends(user_id)):
     if req.url:
+        # The scheme is checked separately because _YT_RE is not anchored: it
+        # searches, so "javascript:alert(1)//youtube.com/watch?v=dQw4w9WgXcQ"
+        # matches on the tail while the whole string — javascript: prefix and
+        # all — is what gets stored, handed to _deeplink() and finally set as an
+        # href by the UI. One click then runs it. Same 400 as before, so the
+        # contract does not change; only input that could never be a video URL
+        # is rejected.
+        if urlsplit(req.url).scheme not in ("http", "https"):
+            raise HTTPException(400, "Not a recognizable YouTube URL.")
         m = _YT_RE.search(req.url)
         if not m:
             raise HTTPException(400, "Not a recognizable YouTube URL.")
         video_id = f"yt_{m.group(1)}"
-        row = db.upsert_pending({"id": video_id, "user_id": uid, "source": "youtube",
+        row = db.upsert_pending({"id": video_id, "user_id": uid, "kind": "video",
+                                 "source": "youtube",
                                  "url": req.url, "storage_key": None,
                                  "source_hash": video_id, "title": req.title})
     elif req.video_id and req.key:
@@ -135,7 +146,8 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
             storage.delete_key(req.key)
             raise HTTPException(413, f"Object exceeds the {MAX_UPLOAD_MB}MB limit.")
         title = req.title or Path(req.key).stem
-        row = db.upsert_pending({"id": req.video_id, "user_id": uid, "source": "upload",
+        row = db.upsert_pending({"id": req.video_id, "user_id": uid, "kind": "video",
+                                 "source": "upload",
                                  "url": None, "storage_key": req.key,
                                  "source_hash": None, "title": title})
     else:
@@ -145,13 +157,13 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
     # order (src/dispatcher.py). FIFO mode: enqueue to Prefect immediately.
     if config.ENABLE_FAIR_DISPATCH:
         return {"video_id": row["id"], "status": "pending"}
-    flow_run_id = jobs.enqueue_video(row["id"], uid)
+    flow_run_id = jobs.enqueue(row["id"], uid, row["kind"])
     return {"video_id": row["id"], "status": row["status"], "flow_run_id": flow_run_id}
 
 
 # ── Status / lifecycle ─────────────────────────────────────────────────────────
 
-_PUBLIC_FIELDS = ("id", "source", "url", "title", "status", "error",
+_PUBLIC_FIELDS = ("id", "kind", "source", "url", "title", "status", "error",
                   "frame_count", "progress", "attempts", "created_at", "updated_at")
 
 
@@ -184,7 +196,7 @@ def retry(video_id: str, uid: str = Depends(user_id)):
     db.set_status(video_id, "pending", error=None)
     if config.ENABLE_FAIR_DISPATCH:
         return {"video_id": video_id, "status": "pending"}  # dispatcher re-admits it fairly
-    flow_run_id = jobs.enqueue_video(video_id, uid)
+    flow_run_id = jobs.enqueue(video_id, uid, row["kind"])
     return {"video_id": video_id, "status": "pending", "flow_run_id": flow_run_id}
 
 
