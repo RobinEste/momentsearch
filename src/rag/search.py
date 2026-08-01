@@ -205,6 +205,17 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
         idx = int(fr["idx"]) if fr else None
         chunk_text = (tx or {}).get("text")
+        # A window the visual branch found alone has no retrieved words, and a
+        # frame carries none of its own. Borrow the transcript chunk that covers
+        # that instant: real indexed text from the same source at the same time,
+        # never invented. It widens the claim from "this image matched" to "this
+        # image matched, and this was being said then", so the borrowing is
+        # marked rather than hidden -- `text_source` is how a reader, and
+        # PRODUCT_EVAL, can tell the two apart.
+        text_source = None
+        if tx is None and page is None and fr is not None:
+            chunk_text = vector_store.text_covering(user_id, vid, ms / 1000.0)
+            text_source = "covering_transcript" if chunk_text else None
         citation = {
             "n": i,
             "video_id": vid,
@@ -223,6 +234,7 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
             # from one variable so the pair cannot drift.
             "transcript": chunk_text,
             "text": chunk_text,
+            "text_source": text_source,
             "modalities": sorted(w["modalities"]),
         }
         if page is None:

@@ -88,8 +88,12 @@ def _user_filter(user_id: str, video_id: str | None = None,
     return qm.Filter(must=must)
 
 
-def _ensure(collection: str, dim: int) -> None:
-    """Create a collection (low-RAM profile) + tenant/video payload indexes."""
+def _ensure(collection: str, dim: int, range_fields: tuple[str, ...] = ()) -> None:
+    """Create a collection (low-RAM profile) + tenant/video payload indexes.
+
+    `range_fields` get a FLOAT index. Qdrant does not merely run a range filter
+    slower without one — it refuses with a 400 ("Index required but not found"),
+    so a range condition and its index are one decision, not two."""
     c = client()
     if not c.collection_exists(collection):
         c.create_collection(
@@ -124,6 +128,15 @@ def _ensure(collection: str, dim: int) -> None:
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+    for field in range_fields:
+        try:
+            c.create_payload_index(collection_name=collection, field_name=field,
+                                   field_schema=qm.PayloadSchemaType.FLOAT)
+        except Exception as exc:  # noqa: BLE001
+            # Not silent: "already exists" is routine, a rejected schema is not,
+            # and the two look identical from here. The consequence of the second
+            # one is a feature that quietly never works, so it gets a line.
+            print(f"[qdrant] payload index {collection}.{field}: {str(exc)[:100]}")
 
 
 def ensure_collection() -> None:
@@ -132,8 +145,12 @@ def ensure_collection() -> None:
 
 
 def ensure_text_collection() -> None:
-    """Transcript (bge text) collection — the second branch."""
-    _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM)
+    """Transcript (bge text) collection — the second branch.
+
+    `t_start`/`t_end` are indexed here and not on the frame collection: the
+    time-window lookup (`text_covering`) only ever reads transcript chunks, and
+    an index nobody filters on is memory for nothing."""
+    _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM, range_fields=("t_start", "t_end"))
 
 
 def upsert_frames(user_id: str, video_id: str, ids: Iterable[int],
@@ -217,6 +234,40 @@ def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
             return []
         raise
     return [{"score": float(h.score), **(h.payload or {})} for h in hits]
+
+
+def text_covering(user_id: str, video_id: str, seconds: float) -> str | None:
+    """The transcript chunk whose span contains `seconds`, or None.
+
+    Filter-only, no vector: "which chunk covers this instant" is a range
+    question, not a similarity one. It serves a frame-only citation — one the
+    visual branch found and the text branch did not — the words that were
+    actually being spoken there, so the citation rests on indexed text instead
+    of on nothing. `limit=1`: chunk spans do not overlap, so there is at most one.
+
+    Documents share this collection but cannot match: they carry no `t_start` /
+    `t_end`, so the range conditions exclude them.
+    """
+    flt = qm.Filter(must=[
+        qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
+        qm.FieldCondition(key="video_id", match=qm.MatchValue(value=video_id)),
+        qm.FieldCondition(key="t_start", range=qm.Range(lte=seconds)),
+        qm.FieldCondition(key="t_end", range=qm.Range(gte=seconds)),
+    ])
+    try:
+        points, _ = client().scroll(collection_name=TEXT_COLLECTION,
+                                    scroll_filter=flt, limit=1, with_payload=True)
+    except Exception as exc:
+        # Degrade, never take the search down with it: this lookup only ever
+        # enriches a citation that would otherwise carry no words. A missing
+        # collection, or a collection indexed before `t_start`/`t_end` were,
+        # costs a borrowed passage -- not the answer.
+        msg = str(exc)
+        if "doesn't exist" in msg or "Not found" in msg or "Index required" in msg:
+            print(f"[text_covering] skipped for {video_id}: {msg[:120]}")
+            return None
+        raise
+    return ((points[0].payload or {}).get("text") or None) if points else None
 
 
 def delete_video(user_id: str, video_id: str) -> None:
