@@ -399,8 +399,12 @@ function renderSources(){
       : img
       ? `<img loading="lazy" src="${esc(img)}" class="w-full h-full object-cover" onerror="this.style.opacity=0">`
       : `<div class="w-full h-full flex items-center justify-center text-muted text-xs p-2 text-center">transcript moment<br>(no frame)</div>`;
+    // A borrowed passage is what was being SAID at the matched instant, not what
+    // the match was made on. Now that a visual-only moment can carry words, the
+    // card says which of the two it is showing.
     const quote = c.transcript
-      ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.transcript)}”</div>` : "";
+      ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">${
+          c.text_source === "covering_transcript" ? "said here: " : ""}“${esc(c.transcript)}”</div>` : "";
     return `
     <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral transition" data-n="${c.n}">
       <div class="aspect-video bg-paper2 overflow-hidden">${thumb}</div>
@@ -450,6 +454,9 @@ function playCitation(n){
     ? `This passage was retrieved from ${locLabel(c)} of the ${c.kind||"document"}${c.section ? ` (${c.section})` : ""}. Open the original to read it in place.`
     : isFrame
     ? "This is what CLIP matched your question against — the still it judged closest to what you asked."
+      + (c.text_source === "covering_transcript"
+         ? " The passage shown is what was being said at that moment; the match itself was visual."
+         : "")
     : "This moment matched on what was said (transcript). Shown is the video’s thumbnail — press play to jump to the exact spot.";
   $("#mOut").href=c.deeplink||"#";
   if(isDoc(c)){
