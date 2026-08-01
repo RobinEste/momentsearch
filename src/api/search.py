@@ -180,8 +180,12 @@ def ask_stream(q: str = "", top_k: int | None = None,
     stream = rag_search.ask_events(q.strip(), uid, top_k=top_k, video_id=video_id)
     try:
         head = [next(stream)]
-    except StopIteration:
-        head = []
+    except StopIteration as exc:
+        # Unreachable today, and deliberately loud rather than fail-open: an
+        # empty stream would otherwise be a 200 whose whole body is `done`,
+        # which every reader here reads as "nothing was found" instead of
+        # "something is wrong" -- the one thing this endpoint is built to avoid.
+        raise HTTPException(502, "Empty read path.") from exc
     except Exception as exc:  # noqa: BLE001
         print(f"[ask_stream] retrieval failed: {type(exc).__name__}: {exc}")
         raise HTTPException(502, "Retrieval failed.") from exc

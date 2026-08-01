@@ -166,9 +166,12 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
     Returns {citations, best_visual, best_text} — the two raw bests feed the
     confidence gate (RRF scores are too small to threshold on). video_ids scopes
     the search to chosen videos (UI select/unselect)."""
-    # Clamped here rather than at the route, so the ceiling holds for every
-    # caller of the read path and not just the one that remembered to validate.
-    k = min(max(top_k or TOP_K, 1), MAX_TOP_K)
+    # The ceiling applies to what a CALLER asked for, never to the server's own
+    # TOP_K: clamping both would let MAX_TOP_K silently override a deployment's
+    # configured TOP_K while /api/config kept reporting the old number, and
+    # MAX_TOP_K=0 would return zero citations for every question with a 200.
+    # `not top_k` keeps 0 meaning "unspecified", as it did before the ceiling.
+    k = TOP_K if not top_k else min(max(top_k, 1), max(MAX_TOP_K, 1))
 
     # Visual branch — CLIP text→image.
     vhits = vector_store.search(embed_text(question), user_id, top_k=BRANCH_TOP_K,
@@ -336,15 +339,19 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
     drifted between them (a gate, a fallback message, an `abstained` flag) would
     answer one way over HTTP and another over SSE for the same question.
 
-    Only `answer`-bearing events are merged, so a new event kind added to the
-    stream cannot leak into this contract by accident."""
+    Merged through an explicit allow-list, not `update(ev)`. The difference is
+    not pedantry: the obvious next change to a stream is per-token deltas
+    (`{"answer": delta, "delta": True}`), and a blind merge would leave this
+    contract holding the last token as the whole answer plus a stray `delta`
+    key. An unknown key is dropped here rather than silently published."""
+    keep = ("answer", "llm_used", "abstained", "note", "llm_source", "llm_model")
     result: dict[str, Any] = {"question": question, "citations": []}
     for ev in ask_events(question, user_id, top_k=top_k, video_id=video_id,
                          video_ids=video_ids):
         if "citations" in ev:
             result["citations"] = ev["citations"]
         elif "answer" in ev:
-            result.update(ev)
+            result.update({k: v for k, v in ev.items() if k in keep})
     return result
 
 
@@ -394,9 +401,11 @@ def ask_events(question: str, user_id: str, *, top_k: int | None = None,
                "note": NO_LLM_NOTE}
         return
 
-    # No model name in the trace: this stream is unauthenticated, and which model
-    # answers for which tenant is not the anonymous caller's business. It is in
-    # the final answer event, which is the tenant's own result.
+    # The trace carries no model name. Note what this does and does not buy: the
+    # answer event below still names the model, and this endpoint has no auth, so
+    # this is tidiness, not a boundary. `GET /api/config` hands the same string to
+    # anonymous callers anyway. Treat the model name as public until the read
+    # path has an identity worth protecting.
     yield {"trace": {"stage": "generating"}}
     moments = _build_moments(user_id, citations)
     answer = _validate_citations(llm.answer(question, moments, cfg), len(citations))
