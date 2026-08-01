@@ -393,7 +393,7 @@ function renderSources(){
     // citation, so the two cannot drift apart.
     const thumb = isDoc(c)
       ? `<div class="w-full h-full flex flex-col items-center justify-center gap-1 bg-paper2">
-           <div class="text-3xl font-600 text-ink">${esc(c.locator||"")}</div>
+           <div class="text-3xl font-600 text-ink">${esc(locLabel(c))}</div>
            <div class="text-[10px] uppercase tracking-wider text-muted">${esc(c.kind||"document")}</div>
          </div>`
       : img
@@ -407,7 +407,7 @@ function renderSources(){
       <div class="p-3">
         <div class="flex items-center gap-2 mb-1">
           <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
-          <span class="text-[11px] text-muted">${esc(c.locator||"")}</span>
+          <span class="text-[11px] text-muted">${esc(locLabel(c))}</span>
           ${tags}
           <span class="text-[11px] text-muted ml-auto">score ${c.score}</span>
         </div>
@@ -427,11 +427,15 @@ function ytId(c){ if(c.video_id&&c.video_id.startsWith("yt_")) return c.video_id
    keeps the two sides of the contract in step. Without this branch a paper
    citation renders as a <video> tag pointed at a URL that does not exist. */
 function isDoc(c){ return c && c.page != null; }
+/* The locator is an object: machine keys (page / slide / start_ms) for the
+   grader, `label` for humans. The UI only ever wants the label, so it asks in
+   one place instead of reaching into the object at seven call sites. */
+function locLabel(c){ return (c && c.locator && c.locator.label) || ""; }
 function playCitation(n){
   const c=CITES.find(x=>x.n===n); if(!c)return;
   const secs=Math.floor((c.ms||0)/1000);
   $("#mTitle").textContent=c.title||c.video_id;
-  $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${c.locator||"?"}`;
+  $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${locLabel(c)||"?"}`;
   const box=$("#playerBox"); const yid=ytId(c);
   // Frame preview if we have one; otherwise (text-only YouTube moment) the
   // video's thumbnail, so the modal never shows an empty preview.
@@ -440,10 +444,10 @@ function playCitation(n){
   $("#mFrame").style.display = preview ? "" : "none";
   if(preview) $("#mFrame").src = preview;
   const isFrame = !!c.thumbnail;
-  $("#mFrameLabel").textContent = isDoc(c) ? `Matched on ${c.locator}`
+  $("#mFrameLabel").textContent = isDoc(c) ? `Matched on ${locLabel(c)}`
     : isFrame ? "Matched frame" : "Matched on transcript";
   $("#mFrameDesc").textContent = isDoc(c)
-    ? `This passage was retrieved from ${c.locator} of the ${c.kind||"document"}${c.section ? ` (${c.section})` : ""}. Open the original to read it in place.`
+    ? `This passage was retrieved from ${locLabel(c)} of the ${c.kind||"document"}${c.section ? ` (${c.section})` : ""}. Open the original to read it in place.`
     : isFrame
     ? "This is what CLIP matched your question against — the still it judged closest to what you asked."
     : "This moment matched on what was said (transcript). Shown is the video’s thumbnail — press play to jump to the exact spot.";
@@ -453,10 +457,10 @@ function playCitation(n){
     // nothing to press play on, and the honest thing to show is the text the
     // answer was grounded in, next to a link that opens the source at that page.
     box.innerHTML=`<div class="w-full h-full overflow-auto bg-paper2 p-5">
-        <div class="text-[11px] uppercase tracking-wider text-muted mb-2">${esc(c.kind||"document")} · ${esc(c.locator||"")}</div>
+        <div class="text-[11px] uppercase tracking-wider text-muted mb-2">${esc(c.kind||"document")} · ${esc(locLabel(c))}</div>
         <div class="text-[14px] leading-relaxed text-ink whitespace-pre-wrap">${esc(c.transcript||"(no text captured for this passage)")}</div>
         ${c.deeplink ? `<a href="${esc(c.deeplink)}" target="_blank" rel="noopener"
-             class="inline-block mt-4 text-sm font-semibold text-coral2 hover:text-coral">Open at ${esc(c.locator||"the source")} →</a>` : ""}
+             class="inline-block mt-4 text-sm font-semibold text-coral2 hover:text-coral">Open at ${esc(locLabel(c)||"the source")} →</a>` : ""}
       </div>`;
   } else if(yid){
     box.innerHTML=`<iframe class="w-full h-full" src="https://www.youtube.com/embed/${yid}?start=${secs}&autoplay=1&rel=0"

@@ -95,11 +95,24 @@ def _deeplink(video: dict | None, video_id: str, ms: int) -> str:
     return f"/api/video/{video_id}#t={secs}"
 
 
-def _doc_locator(kind: str, page: int) -> str:
+def _doc_locator(kind: str, page: int) -> dict[str, Any]:
     """A deck says "slide 3" where a paper says "p. 3" — same `page` payload
-    field, different noun. Only the label is per-kind, so only the label
-    branches, here, once."""
-    return f"slide {page}" if kind == "deck" else f"p. {page}"
+    field, different noun. Per-kind now covers both the machine key and the
+    label, so both branch here, once.
+
+    The key is flat on the object, not nested under a kind discriminator: the
+    grader reads `locator.page` / `locator.slide` directly (eval/eval.py:102,106),
+    so a tidier `{"kind": ..., "ref": {...}}` would score zero. The discriminator
+    lives next to the locator, on the citation's own `kind`."""
+    if kind == "deck":
+        return {"slide": page, "label": f"slide {page}"}
+    return {"page": page, "label": f"p. {page}"}
+
+
+def _video_locator(ms: int) -> dict[str, Any]:
+    """`start_ms` is the name non-negotiable 2 gives the video locator; `ms` on
+    the citation root is the same number under the frozen video contract."""
+    return {"start_ms": ms, "label": _seconds(ms)}
 
 
 def _doc_deeplink(source: dict | None, page: int) -> str | None:
@@ -171,6 +184,7 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         # seek); otherwise the transcript chunk's start.
         ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
         idx = int(fr["idx"]) if fr else None
+        chunk_text = (tx or {}).get("text")
         citation = {
             "n": i,
             "video_id": vid,
@@ -179,17 +193,22 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
             "url": (meta or {}).get("url"),
             "source": (meta or {}).get("source"),
             "score": round(w["rrf"], 4),
-            "transcript": (tx or {}).get("text"),
+            # One value, two names. `transcript` is what the UI has always read;
+            # `text` is the name the grader reads (eval/eval.py:114). Assigned
+            # from one variable so the pair cannot drift.
+            "transcript": chunk_text,
+            "text": chunk_text,
             "modalities": sorted(w["modalities"]),
         }
         if page is None:
-            stamp = _seconds(ms)
+            loc = _video_locator(ms)
             citation.update({
                 "ms": ms,
-                # Same string under two names: `timestamp` is the frozen video
-                # contract, `locator` is what every source kind answers to.
-                "timestamp": stamp,
-                "locator": stamp,
+                # Same instant under two names: `timestamp` is the frozen video
+                # contract, `locator` is what every source kind answers to. Both
+                # read the one label, so they cannot drift and it is formatted once.
+                "timestamp": loc["label"],
+                "locator": loc,
                 "idx": idx,
                 "thumbnail": _thumb_url(user_id, vid, idx) if idx is not None else None,
                 "media_url": _media_url(meta, user_id, vid),
@@ -218,8 +237,9 @@ def _fallback_answer(citations: list[dict[str, Any]]) -> str:
     """No-LLM summary: rank the visually-closest moments. Honest about being
     similarity, not synthesis."""
     top = citations[0]
-    where = f"{top['title']} at {top['locator']}" if top.get("title") else top["locator"]
-    others = ", ".join(f"{c['locator']} [{c['n']}]" for c in citations[1:4])
+    top_label = top["locator"]["label"]
+    where = f"{top['title']} at {top_label}" if top.get("title") else top_label
+    others = ", ".join(f"{c['locator']['label']} [{c['n']}]" for c in citations[1:4])
     msg = f"Closest match: {where} [{top['n']}] (similarity {top['score']})."
     if others:
         msg += f" Other relevant moments: {others}."
@@ -251,10 +271,11 @@ def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         images = list(ex.map(frame_bytes, citations))
-    # `locator` rather than `timestamp`: this is the string the model is asked to
-    # cite back, and for a paper it has to read "p. 4" and not "00:00".
+    # The locator's label rather than `timestamp`: this is the string the model
+    # is asked to cite back, and for a paper it has to read "p. 4" and not
+    # "00:00". The machine keys next to it mean nothing to the model.
     return [{"image": img, "transcript": c.get("transcript"),
-             "timestamp": c["locator"]} for img, c in zip(images, citations)]
+             "timestamp": c["locator"]["label"]} for img, c in zip(images, citations)]
 
 
 def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:

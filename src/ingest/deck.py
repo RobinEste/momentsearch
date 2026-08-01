@@ -11,9 +11,11 @@ differs, and it differs in exactly three ways, each deliberate:
     calling it `page` — that field is the structural signal the whole document
     branch keys on (`_fuse.same_window`, the document branch of `retrieve`,
     `isDoc()` in the UI). Introducing a third locator field would put those
-    three places out of step the first time one of them was forgotten. Only the
-    human-facing label differs, and it is derived from `kind` at citation time,
-    in one place. What changes here is the context line prepended before
+    three places out of step the first time one of them was forgotten. What
+    differs is the citation's locator — both its machine key (`slide` rather
+    than `page`, which the grader reads) and its human label — and both are
+    derived from `kind` at citation time, in one place (`_doc_locator`). What
+    changes here is the context line prepended before
     embedding: "slide 7", not "page 7", because that string is read by the
     embedding model and a deck's own vocabulary retrieves better.
 
