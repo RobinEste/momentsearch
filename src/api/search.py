@@ -7,6 +7,7 @@ playback stream via presigned URLs and never touch this process.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from pathlib import Path
@@ -171,22 +172,41 @@ def ask_stream(q: str = "", top_k: int | None = None,
         raise HTTPException(400, "Empty question.")
     uid = _uid(x_user_id)
 
+    # Retrieval runs on the first `next`, and Starlette commits the 200 before it
+    # touches the body generator. Pulling that first event HERE is what keeps a
+    # real status code available for a retrieval failure: inside the generator it
+    # would become a 200 carrying an error, which every reader of this stream —
+    # the graders included — sees as "no citations" rather than as a failure.
+    stream = rag_search.ask_events(q.strip(), uid, top_k=top_k, video_id=video_id)
+    try:
+        head = [next(stream)]
+    except StopIteration:
+        head = []
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ask_stream] retrieval failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(502, "Retrieval failed.") from exc
+
     def events():
         try:
-            for ev in rag_search.ask_events(q.strip(), uid, top_k=top_k,
-                                            video_id=video_id):
+            # chain, not (*head, *stream): unpacking into a tuple would drain the
+            # generator before the first frame is written, so a failure during
+            # generation would swallow the citations that had already been
+            # produced -- the opposite of why they are emitted first.
+            for ev in itertools.chain(head, stream):
                 yield _sse(ev)
         except Exception as exc:  # noqa: BLE001
-            # The 200 status line left the building with the first event, so a
-            # 502 is no longer available. Say it in-band and close the stream
-            # rather than letting the client hang on a truncated body. The
-            # detail goes to the server log, not to the reader.
-            print(f"[ask_stream] failed: {type(exc).__name__}: {exc}")
+            # Past this point the 200 really is gone, so the honest move is to
+            # say it in-band and close rather than truncate the body. The detail
+            # goes to the server log, not to an anonymous reader.
+            print(f"[ask_stream] generation failed: {type(exc).__name__}: {exc}")
             yield _sse({"error": "answer generation failed"})
         yield _sse({"done": True})
 
     return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"cache-control": "no-cache",
+                             # `no-store, private`: the body carries one tenant's
+                             # transcript text and short-lived presigned URLs, and
+                             # there is no Vary to key a shared cache on.
+                             headers={"cache-control": "no-store, private",
                                       "x-accel-buffering": "no"})
 
 

@@ -288,6 +288,11 @@ QDRANT_HNSW_ON_DISK = _envbool("QDRANT_HNSW_ON_DISK", True)
 # --- Retrieval / faithfulness ------------------------------------------------------
 TOP_K = _int("TOP_K", 6)                 # frames fed to the multimodal LLM (3-8)
 KNN_K = _int("KNN_K", 24)                # candidates fetched before trimming to TOP_K
+# Ceiling on a caller-supplied top_k. The read path is reachable without a token,
+# and every extra citation is a bucket fetch, a JPEG decode and one more image in
+# the prompt -- so an unclamped `?top_k=999` hands a cost multiplier to anyone
+# with the URL. Clamped in `retrieve`, so both /api/ask and /ask_stream inherit it.
+MAX_TOP_K = _int("MAX_TOP_K", 12)
 # Gate 1: abstain WITHOUT calling the LLM if BOTH branches' best raw score is
 # below their threshold. Fusion scores are RRF (tiny), so the gate uses each
 # branch's own raw cosine. CLIP text->image cosines run low (~0.2-0.35); bge

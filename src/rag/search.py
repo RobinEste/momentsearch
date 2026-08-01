@@ -17,13 +17,19 @@ from typing import Any
 
 from .. import config, db, llm, storage
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
-                      FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
+                      FUSION_WINDOW_S, MAX_TOP_K, RRF_K,
+                      TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
 from .embeddings import embed_query, embed_text
 
 ABSTAIN = ("I couldn't find that in your sources — nothing indexed looks "
            "related to the question (neither what's on screen, what's said, "
            "nor what's written).")
+NO_SOURCES = ("Nothing relevant was found. Try ingesting a video or "
+              "a document first.")
+NO_LLM_NOTE = ("Retrieval-only results. Connect your own model "
+               "(vLLM/Ollama/API) in settings, or set LLM_API_KEY "
+               "on the server, for a synthesized, grounded answer.")
 
 
 def _seconds(ms: int) -> str:
@@ -111,13 +117,17 @@ def _doc_locator(kind: str, page: int) -> dict[str, Any]:
     return {"page": page, "label": f"p. {page}"}
 
 
-def _video_locator(ms: int, end_ms: int) -> dict[str, Any]:
+def _video_locator(ms: int, t_end: float | None = None) -> dict[str, Any]:
     """`start_ms` is the name non-negotiable 2 gives the video locator; `ms` on
     the citation root is the same number under the frozen video contract.
-    `end_ms` closes the span the moment covers — the transcript chunk's end when
-    one was retrieved, otherwise the anchor itself, because a frame is an
-    instant and inventing a duration for it would be a made-up locator."""
-    return {"start_ms": ms, "end_ms": max(ms, end_ms), "label": _seconds(ms)}
+
+    `end_ms` closes the span: the retrieved transcript chunk's end (`t_end`, in
+    seconds) when there was one, otherwise the anchor itself, because a frame is
+    an instant and inventing a duration for it would be a made-up locator. The
+    `max` is not decoration — a frame can be anchored later than the end of the
+    chunk it fused with, anywhere inside FUSION_WINDOW_S."""
+    end = int(t_end * 1000) if t_end is not None else ms
+    return {"start_ms": ms, "end_ms": max(ms, end), "label": _seconds(ms)}
 
 
 def _doc_deeplink(source: dict | None, page: int) -> str | None:
@@ -156,7 +166,9 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
     Returns {citations, best_visual, best_text} — the two raw bests feed the
     confidence gate (RRF scores are too small to threshold on). video_ids scopes
     the search to chosen videos (UI select/unselect)."""
-    k = top_k or TOP_K
+    # Clamped here rather than at the route, so the ceiling holds for every
+    # caller of the read path and not just the one that remembered to validate.
+    k = min(max(top_k or TOP_K, 1), MAX_TOP_K)
 
     # Visual branch — CLIP text→image.
     vhits = vector_store.search(embed_text(question), user_id, top_k=BRANCH_TOP_K,
@@ -193,9 +205,10 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         citation = {
             "n": i,
             "video_id": vid,
-            # The assignment's citation example names this `sourceId` for every
-            # kind (README "GET /ask_stream"); `video_id` is the base app's own
-            # name and the UI reads it. Same id, both names.
+            # The assignment brief's citation example names this `sourceId` for
+            # every kind (the course repo's Assignment_3 README, not this one);
+            # `video_id` is the base app's own name and the UI reads it. Same id,
+            # both names.
             "sourceId": vid,
             "kind": kind,
             "title": (meta or {}).get("title") or vid,
@@ -210,10 +223,7 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
             "modalities": sorted(w["modalities"]),
         }
         if page is None:
-            # The moment ends where the retrieved transcript chunk ends; with no
-            # chunk there is nothing but the frame's instant to point at.
-            t_end = (tx or {}).get("t_end")
-            loc = _video_locator(ms, int(t_end * 1000) if t_end is not None else ms)
+            loc = _video_locator(ms, (tx or {}).get("t_end"))
             citation.update({
                 "ms": ms,
                 # Same instant under two names: `timestamp` is the frozen video
@@ -318,59 +328,48 @@ def _confident(r: dict[str, Any]) -> bool:
 def ask(question: str, user_id: str, *, top_k: int | None = None,
         video_id: str | None = None,
         video_ids: list[str] | None = None) -> dict[str, Any]:
-    r = retrieve(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
-    citations = r["citations"]
-    result: dict[str, Any] = {"question": question, "citations": citations}
+    """The read path as one object — the shape POST /api/ask has always
+    returned, and the UI's contract (non-negotiable 6).
 
-    if not citations:
-        result.update(answer="Nothing relevant was found. Try ingesting a video or "
-                             "a document first.",
-                      llm_used=False, abstained=True)
-        return result
+    Collected from `ask_events` rather than walking the path a second time: the
+    two used to be the same four branches written twice, and anything that
+    drifted between them (a gate, a fallback message, an `abstained` flag) would
+    answer one way over HTTP and another over SSE for the same question.
 
-    if not _confident(r):
-        result.update(answer=ABSTAIN, llm_used=False, abstained=True)
-        return result
-
-    cfg, source = resolve_llm(user_id)
-    if cfg is None:
-        # No generative model — summarize the best matches instead of inventing.
-        result.update(answer=_fallback_answer(citations), llm_used=False,
-                      note=("Retrieval-only results. Connect your own model "
-                            "(vLLM/Ollama/API) in settings, or set LLM_API_KEY "
-                            "on the server, for a synthesized, grounded answer."))
-        return result
-
-    moments = _build_moments(user_id, citations)
-    result["answer"] = _validate_citations(llm.answer(question, moments, cfg),
-                                           len(citations))
-    result["llm_used"] = True
-    result["llm_source"] = source          # "user" = their own hosted model
-    result["llm_model"] = cfg.model
+    Only `answer`-bearing events are merged, so a new event kind added to the
+    stream cannot leak into this contract by accident."""
+    result: dict[str, Any] = {"question": question, "citations": []}
+    for ev in ask_events(question, user_id, top_k=top_k, video_id=video_id,
+                         video_ids=video_ids):
+        if "citations" in ev:
+            result["citations"] = ev["citations"]
+        elif "answer" in ev:
+            result.update(ev)
     return result
-
-
-NO_SOURCES = ("Nothing relevant was found. Try ingesting a video or "
-              "a document first.")
-NO_LLM_NOTE = ("Retrieval-only results. Connect your own model "
-               "(vLLM/Ollama/API) in settings, or set LLM_API_KEY "
-               "on the server, for a synthesized, grounded answer.")
 
 
 def ask_events(question: str, user_id: str, *, top_k: int | None = None,
                video_id: str | None = None,
                video_ids: list[str] | None = None) -> Iterator[dict[str, Any]]:
-    """The same read path as `ask`, emitted in the order it actually happens:
-    trace, then citations, then the answer.
+    """The read path emitted in the order it actually happens: trace, then
+    citations, then the answer. `ask` is this same walk, collected.
 
     Why citations before the answer and not with it: retrieval is milliseconds
-    and the LLM call is seconds, so a reader that waits for the whole thing pays
-    for generation it may not need. The grading harness is exactly such a reader
-    — it stops at the first event carrying `citations` (eval/eval.py:55-56).
+    and the LLM call is seconds, so a reader that only wants to know what was
+    retrieved has them in retrieval time instead of waiting out generation. Note
+    what this does NOT promise: a reader that disconnects after the citations
+    does not reliably stop the generation. Nothing here polls for disconnect, and
+    this generator is advanced in a worker thread that cancellation cannot
+    interrupt, so the LLM call usually completes and is usually paid for.
 
-    No event before the citations may carry a top-level `citations` key, or that
-    harness would return the wrong object; the trace nests its count under
-    `trace` for that reason.
+    Protocol rule that follows from that: **`citations` is a reserved top-level
+    key.** It appears exactly once, on the citations event, and no event before
+    it may carry it — that is what lets a consumer stop at the first event that
+    has one. The trace nests its own count under `trace` for this reason.
+
+    The first event is yielded only after `retrieve` returns, so pulling it
+    eagerly is how a caller turns a retrieval failure into a real status code
+    instead of an error buried in a stream that already claimed success.
     """
     t0 = time.perf_counter()
     r = retrieve(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
@@ -395,7 +394,10 @@ def ask_events(question: str, user_id: str, *, top_k: int | None = None,
                "note": NO_LLM_NOTE}
         return
 
-    yield {"trace": {"stage": "generating", "model": cfg.model, "source": source}}
+    # No model name in the trace: this stream is unauthenticated, and which model
+    # answers for which tenant is not the anonymous caller's business. It is in
+    # the final answer event, which is the tenant's own result.
+    yield {"trace": {"stage": "generating"}}
     moments = _build_moments(user_id, citations)
     answer = _validate_citations(llm.answer(question, moments, cfg), len(citations))
     yield {"answer": answer, "llm_used": True, "llm_source": source,
