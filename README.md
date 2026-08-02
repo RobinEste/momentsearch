@@ -376,7 +376,7 @@ one user who uploads 50 videos blocks everyone behind them. Instead videos wait
 `pending` in Postgres and a **dispatcher** ([src/dispatcher.py](src/dispatcher.py))
 admits them **round-robin across users**, keeping only `DISPATCH_MAX_INFLIGHT`
 running at once. So the waiting line lives in *our* DB, fairly ordered
-([`db.wfq_claim`](src/db.py) ranks each user's videos by age and takes
+([`db.wfq_claim`](src/db/queue.py) ranks each user's videos by age and takes
 everyone's oldest first, then everyone's second, …) — no user can starve the
 others. Set `ENABLE_FAIR_DISPATCH=false` to fall back to plain FIFO and see the
 difference. `DISPATCH_MAX_INFLIGHT` should equal your real capacity
@@ -491,7 +491,7 @@ the four entrypoints as top-level modules in the package.
     ├── seed.py              startup gate — indexes the 4 samples, then exits
     │                        ── core ──────────────────────────────────────────
     ├── config.py            every env knob in one place
-    ├── db.py                Neon Postgres: manifest + status + per-user LLM rows
+    ├── db/                  Neon Postgres: manifest, work queue, per-user LLM rows
     ├── jobs.py              Prefect Cloud trigger (API-side run_deployment)
     ├── storage.py           object storage (aws|gcp|gcp_native|flyio|local)
     │                        + presigned PUT/GET, HEAD verify, batch delete

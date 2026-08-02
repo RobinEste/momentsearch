@@ -15,6 +15,14 @@
 #      fresh clone with no secret manager. Marked optional so the stack also
 #      starts when no .env exists.
 x-app-env: &app-env
+  # Without this, Python buffers stdout when it is a pipe rather than a tty, so
+  # `docker compose logs` shows nothing from the app until the buffer happens to
+  # flush. Measured on a live crash test: the worker had run a full ingest and
+  # emitted not one line. That matters beyond tidiness — the reaper's "[reap]
+  # <id> ... requeued" line is the only durable record that a source was lost
+  # and re-offered, since the reason it writes to the row is overwritten by the
+  # next status write of the replacement run.
+  - PYTHONUNBUFFERED=1
   - CLIP_SERVICE_URL=${CLIP_SERVICE_URL:-http://clip:8001}
   # One worker process executes up to WORKER_CONCURRENCY runs at once. With the
   # clip service doing the embedding, each run is light (download + ffmpeg
