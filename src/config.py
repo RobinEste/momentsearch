@@ -140,6 +140,115 @@ ENABLE_FAIR_DISPATCH = _envbool("ENABLE_FAIR_DISPATCH", True)
 DISPATCH_MAX_INFLIGHT = _int("DISPATCH_MAX_INFLIGHT", _int("WORKER_CONCURRENCY", 2))
 DISPATCH_INTERVAL_S = _float("DISPATCH_INTERVAL_S", 3.0)  # how often the dispatcher tops up
 
+# --- Crash recovery: heartbeat + reaper ---------------------------------------
+# Why any of this exists, and how the two signals divide the work: see the
+# module docstring of src/reaper.py. That is the canonical account; what lives
+# here are the numbers and where they come from.
+REAP_ENABLED = _envbool("REAP_ENABLED", True)
+REAP_INTERVAL_S = _float("REAP_INTERVAL_S", 10.0)
+HEARTBEAT_INTERVAL_S = _float("HEARTBEAT_INTERVAL_S", 10.0)
+HEARTBEAT_STALE_AFTER_S = _float("HEARTBEAT_STALE_AFTER_S", 45.0)  # 4.5 missed beats
+# A source that keeps killing its worker would otherwise be requeued forever,
+# burning a slot each round. `attempts` counts starts since the last success
+# (db.start_run bumps it, set_status clears it on a clean landing), so this is
+# consecutive failures and not a lifetime total.
+MAX_ATTEMPTS = _int("MAX_ATTEMPTS", 3)
+# Landing on one of these clears the counter: the source got somewhere on its
+# own. Derived from TERMINAL_STATUSES minus 'failed' rather than listed, so a
+# future clean-landing status resets it the moment it exists.
+#
+# 'pending' is deliberately NOT here even though it is also not-in-flight. The
+# dispatcher writes 'pending' through set_status when it cannot reach Prefect
+# (dispatcher.py), and that is neither a success nor a human asking again — it
+# would hand the give-up counter an endless supply of fresh starts. The two
+# paths where a human really does ask again (registration, retry) zero the
+# counter explicitly in their own statement instead.
+ATTEMPT_RESET_STATUSES = tuple(s for s in TERMINAL_STATUSES if s != "failed")
+
+# Per-phase budgets as (base seconds, seconds per unit of work), from measured
+# rates with roughly a 9x margin rather than guessed:
+#   sampling   55 ms/frame  (400 sampled + dedup in 22s)
+#   embedding  55 ms/item   (one CLIP batch of 128 in ~7s, warm clip-service)
+#   parsing    2.0 ms/page  — even a 2000-page PDF is seconds, so it stays flat
+# `units` is the size of the work the phase is about to do, passed by the caller
+# that knows it: the chunk or frame count for embedding, the configured ceiling
+# for sampling. Parsing and fetching learn their size only BY doing the work, so
+# they are flat.
+#
+# The base is not slack, it is the legitimate idle a phase may contain. A task
+# with @task(retries=n, retry_delay_seconds=d) sleeps between attempts while its
+# flow is alive and beating, and the deadline is restamped only when the next
+# attempt starts — so a base below that backoff reaps a healthy run mid-retry,
+# which is the one failure this whole mechanism must never cause. Hence:
+#   embedding  t_embed_index retries with a 60s delay -> 60s work slack + 120s
+#   fetching   t_fetch retries with [30, 120] -> 1800s covers it many times over
+# Generous where the work is unpredictable, tight where it was measured: a
+# download is network-bound, and a crash there is already caught in 45s by the
+# heartbeat, so its budget only has to bound a hang.
+PHASE_BUDGETS_S: dict[str, tuple[float, float]] = {
+    # Admission to the flow's first line: a round trip to Prefect Cloud, its
+    # scheduling, a free worker slot, a subprocess spawn and a ~15-30s torch
+    # import. Nothing here is under our control and being early is the expensive
+    # direction, so it is roomy. It is also the only thing that can speak for a
+    # run Prefect never picks up at all: a worker killed between admission and
+    # delivery leaves a row no heartbeat will ever vouch for.
+    "queued":    (900.0, 0.0),
+    "fetching":  (1800.0, 0.0),
+    "parsing":   (300.0, 0.0),
+    # NOT indexed to the frame count, however tempting: sample() runs one ffmpeg
+    # pass with an fps filter, which decodes the ENTIRE source and then emits
+    # ~MAX_FRAMES of it. The measured 55 ms/frame is the emit, not the decode,
+    # and the decode tracks the video's duration — which nothing here knows at
+    # phase entry. A budget derived from the wrong variable reaped a healthy
+    # two-hour lecture; flat and roomy is the honest shape.
+    "sampling":  (1800.0, 0.0),
+    "embedding": (180.0, 0.5),
+    # The caption branch: a network fetch plus a bge embed of the whole
+    # transcript, with no progress ticks and nothing at phase entry that knows
+    # how many cues there will be. It exists as a phase at all because the row
+    # must stay in flight while this runs — releasing it early handed a live
+    # source to /retry — and a phase that is in flight needs a budget it can
+    # actually make.
+    "transcribing": (600.0, 0.0),
+}
+# An unrecognised phase gets this, and it is deliberately the roomy end: a stage
+# name nobody remembered to budget must not be reaped early. Same failure
+# direction as NOT_INFLIGHT_STATUSES above — err towards leaving work alone.
+DEFAULT_PHASE_BUDGET_S = (900.0, 0.0)
+# One knob for "this machine is slower than the one those rates came from". They
+# were measured on a laptop in Docker with a warm CLIP service; a small cloud
+# machine can be several times slower, and a budget that feels roomy locally
+# eats live runs there, where it is hardest to see.
+PHASE_BUDGET_SCALE = _float("PHASE_BUDGET_SCALE", 1.0)
+# How long a phase that reports progress may go WITHOUT reporting any. Once a
+# stage is ticking, "it stopped ticking" is a sharper reading of hung than "it
+# outran an estimate of its total size", so db.set_progress restamps with this
+# instead of with the phase budget. Deliberately shorter than most of those
+# budgets: a stalled tick is better evidence, so it may act sooner.
+PROGRESS_STALL_S = _float("PROGRESS_STALL_S", 300.0)
+# The hard ceiling Prefect puts on a whole run. It scales with the same knob so
+# that raising PHASE_BUDGET_SCALE does not silently push the phase budgets past
+# it — but the two are NOT provably ordered: the embedding and sampling budgets
+# grow with the work, task retries multiply a phase's budget by the attempt
+# count, and setting FLOW_TIMEOUT_S explicitly overrides the scaling entirely.
+# So this is a backstop, not a coordinated bound. When it does fire first the
+# run process ends, its heartbeat stops, and the reaper requeues the row within
+# HEARTBEAT_STALE_AFTER_S — a worse diagnosis than an expired phase budget, not
+# a lost source.
+FLOW_TIMEOUT_S = _float("FLOW_TIMEOUT_S", 7200.0 * PHASE_BUDGET_SCALE)
+
+
+def phase_budget_s(phase: str, units: int | None = None) -> float | None:
+    """How long `phase` may last before the reaper calls it hung.
+
+    None means no deadline: the row is waiting or finished, so it is not holding
+    anyone up.
+    """
+    if phase in NOT_INFLIGHT_STATUSES:
+        return None
+    base, per_unit = PHASE_BUDGETS_S.get(phase, DEFAULT_PHASE_BUDGET_S)
+    return (base + per_unit * (units or 0)) * PHASE_BUDGET_SCALE
+
 # --- Frame sampling (the biggest scaling lever) --------------------------------
 # interval: one frame every FRAME_INTERVAL_SEC (widened to respect MAX_FRAMES).
 # scene:    one frame per detected cut (ffmpeg scene filter).

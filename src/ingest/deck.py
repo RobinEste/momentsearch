@@ -35,21 +35,22 @@ from pathlib import Path
 
 from prefect import flow, task
 
-from .. import db
+from .. import config, db
 from .chunking import SLIDE_MIN_CHUNK_CHARS, chunk_text, context_line, verify_token_limit
 from ..rag.embeddings import count_tokens
 from .document import t_embed_index, t_fetch
+from .run import ingest_run
 from .pdf import parse_pdf
 
 
 @task(name="parse-deck")
-def t_parse(doc_id: str, path: str, title: str | None) -> list[dict]:
+def t_parse(doc_id: str, path: str, title: str | None, token: str) -> list[dict]:
     """PDF deck -> slide-scoped chunks with their locator.
 
     A chunk never spans two slides, for the same reason a paper chunk never
     spans two pages: the number is what a citation points at.
     """
-    db.set_status(doc_id, "parsing", progress=0.0)
+    db.set_status(doc_id, "parsing", progress=0.0, token=token)
     slides = parse_pdf(Path(path).read_bytes())
     if not slides:
         raise RuntimeError("PDF has no pages.")
@@ -105,28 +106,22 @@ def t_parse(doc_id: str, path: str, title: str | None) -> list[dict]:
     return chunks
 
 
-@flow(name="ms-ingest-deck", log_prints=True, timeout_seconds=3600)
+@flow(name="ms-ingest-deck", log_prints=True, timeout_seconds=config.FLOW_TIMEOUT_S)
 def ingest_deck(video_id: str, user_id: str) -> dict:
     """Parameter is named video_id because the deployment contract is shared
     with the video and paper flows (src/jobs.py schedules all three the same
     way) and the manifest still calls its primary key that. Renaming is queued
-    as cleanup — see db.py's module docstring."""
-    attempt = db.bump_attempts(video_id)
-    path: str | None = None
-    try:
-        path, title = t_fetch(video_id, user_id)
+    as cleanup — see db/manifest.py's module docstring."""
+    with ingest_run(video_id) as run:
+        path, title = t_fetch(video_id, user_id, run.token)
         if not path:  # duplicate — already marked 'skipped' by t_fetch
             print(f"[ingest] {video_id} skipped (duplicate content)")
             return {"video_id": video_id, "skipped": True}
-        chunks = t_parse(video_id, path, title)
-        n = t_embed_index(video_id, user_id, chunks, kind="deck", ns="slide")
+        run.scratch = path
+        chunks = t_parse(video_id, path, title, run.token)
+        n = t_embed_index(video_id, user_id, chunks, run.token,
+                          kind="deck", ns="slide")
         slides = len({c["page"] for c in chunks})
         print(f"[ingest] {video_id} indexed: {n} chunks over {slides} slides "
-              f"(attempt {attempt})")
+              f"(attempt {run.attempt})")
         return {"video_id": video_id, "chunks": n, "slides": slides}
-    except Exception as exc:
-        db.set_status(video_id, "failed", error=f"{type(exc).__name__}: {exc}")
-        raise  # Prefect marks the run Failed; full trace in the Cloud UI
-    finally:
-        if path:  # scratch only — durable copies live in object storage
-            Path(path).unlink(missing_ok=True)

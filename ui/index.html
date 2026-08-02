@@ -229,6 +229,7 @@ async function loadVideos(){
       case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
       case "parsing":   return {icon:"⏳", label:"parsing"+pct(v),   c:"text-[#8a6d1a]"};
       case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};
+      case "transcribing": return {icon:"⏳", label:"transcript…",  c:"text-[#8a6d1a]"};
       case "failed":    return {icon:"⚠", label:"failed",           c:"text-coral2"};
       case "skipped":   return {icon:"⊘", label:"duplicate",        c:"text-muted"};
       default:          return {icon:"•", label:v.status,           c:"text-muted"};

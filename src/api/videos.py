@@ -153,12 +153,19 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
     else:
         raise HTTPException(400, "Provide either url (YouTube) or video_id+key (upload).")
 
+    # `status` stays the documented "accepted for ingest"; `current_status` is
+    # what the row actually says, which can differ now that upsert_pending leaves
+    # an in-flight row alone (see admin.py, same shape).
+    accepted = {"video_id": row["id"], "status": "pending",
+                **({"current_status": row["status"]}
+                   if row["status"] != "pending" else {})}
     # Fair dispatch (WFQ): leave it `pending` — the dispatcher admits it in fair
-    # order (src/dispatcher.py). FIFO mode: enqueue to Prefect immediately.
-    if config.ENABLE_FAIR_DISPATCH:
-        return {"video_id": row["id"], "status": "pending"}
-    flow_run_id = jobs.enqueue(row["id"], uid, row["kind"])
-    return {"video_id": row["id"], "status": row["status"], "flow_run_id": flow_run_id}
+    # order (src/dispatcher.py). FIFO mode: enqueue to Prefect immediately, but
+    # NOT when the guard just refused to reset it, or that is a second run on a
+    # source a worker is already holding.
+    if config.ENABLE_FAIR_DISPATCH or row["status"] not in config.NOT_INFLIGHT_STATUSES:
+        return accepted
+    return {**accepted, "flow_run_id": jobs.enqueue(row["id"], uid, row["kind"])}
 
 
 # ── Status / lifecycle ─────────────────────────────────────────────────────────
@@ -190,10 +197,21 @@ def get_video(video_id: str, uid: str = Depends(user_id)):
 
 @router.post("/{video_id}/retry", status_code=202, dependencies=[Depends(require_auth)])
 def retry(video_id: str, uid: str = Depends(user_id)):
-    row = db.get_video(video_id)
-    if row is None or row["user_id"] != uid:
-        raise HTTPException(404, "Video not found.")
-    db.set_status(video_id, "pending", error=None)
+    # Re-queueing something a worker is busy with would start a SECOND flow on
+    # the same source: two runs sharing one scratch file, and the delete at the
+    # top of one landing between the upserts of the other. Only the reaper may
+    # move an in-flight row, and only once it is provably dead. db.requeue
+    # decides and writes in one statement, so there is no window between the two.
+    row = db.requeue(video_id, uid)
+    if row is None:
+        # Only now pay for a read, to tell "not yours / no such id" (404) from
+        # "yours, but busy" (409). The happy path stays at one round trip.
+        existing = db.get_video(video_id)
+        if existing is None or existing["user_id"] != uid:
+            raise HTTPException(404, "Video not found.")
+        raise HTTPException(
+            409, f"Already in progress (status {existing['status']}). If its "
+                 "worker went away it is requeued automatically.")
     if config.ENABLE_FAIR_DISPATCH:
         return {"video_id": video_id, "status": "pending"}  # dispatcher re-admits it fairly
     flow_run_id = jobs.enqueue(video_id, uid, row["kind"])

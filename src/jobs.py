@@ -45,7 +45,7 @@ def enqueue(source_id: str, user_id: str, kind: str) -> str:
     flow_run = run_deployment(
         name=deployment,
         # The parameter is still called video_id: both flows take it, and the
-        # manifest's primary key has not been renamed yet (see db.py).
+        # manifest's primary key has not been renamed yet (see src/db/).
         parameters={"video_id": source_id, "user_id": user_id},
         timeout=0,  # fire-and-forget: don't block the API waiting for the run
         flow_run_name=f"ingest-{source_id}",

@@ -23,7 +23,7 @@ _EMBED_BATCH = 64
 
 
 @task(name="fetch-document", retries=2, retry_delay_seconds=[30, 120])
-def t_fetch(doc_id: str, user_id: str) -> tuple[str, str | None]:
+def t_fetch(doc_id: str, user_id: str, token: str) -> tuple[str, str | None]:
     """Source PDF -> worker scratch file; duplicate check on the CONTENT hash.
 
     Returns (path, title). The title rides along because this task already has
@@ -42,7 +42,7 @@ def t_fetch(doc_id: str, user_id: str) -> tuple[str, str | None]:
     manifest row rather than assuming one, so identical bytes registered as a
     paper and as a deck stay two separate sources.
     """
-    db.set_status(doc_id, "fetching")
+    db.set_status(doc_id, "fetching", token=token)
     row = db.get_video(doc_id)
     if row is None:
         raise ValueError(f"no manifest row for {doc_id}")
@@ -56,18 +56,19 @@ def t_fetch(doc_id: str, user_id: str) -> tuple[str, str | None]:
         raise ValueError(f"{doc_id} has neither a url nor a storage key")
 
     source_hash = fetch_mod.sha256_file(path)
-    db.set_status(doc_id, "fetching", source_hash=source_hash)
+    db.set_status(doc_id, "fetching", source_hash=source_hash, token=token)
     duplicate = db.find_duplicate(user_id, source_hash, exclude_id=doc_id,
                                   kind=row["kind"])
     if duplicate:
         path.unlink(missing_ok=True)
-        db.set_status(doc_id, "skipped", error=f"duplicate of {duplicate['id']}")
+        db.set_status(doc_id, "skipped", error=f"duplicate of {duplicate['id']}",
+                      token=token)
         return "", None
     return str(path), row.get("title")
 
 
 @task(name="embed-index-document", retries=2, retry_delay_seconds=60)
-def t_embed_index(doc_id: str, user_id: str, chunks: list[dict],
+def t_embed_index(doc_id: str, user_id: str, chunks: list[dict], token: str,
                   *, kind: str = "paper", ns: str = "page") -> int:
     """Batched bge embeddings -> idempotent upsert into the shared text
     collection. Deleting first drops points a previous, longer run left behind:
@@ -79,7 +80,9 @@ def t_embed_index(doc_id: str, user_id: str, chunks: list[dict],
     feeds the deterministic point id, so a different default would strand every
     point already indexed under "page".
     """
-    db.set_status(doc_id, "embedding", progress=0.0)
+    # Fenced BEFORE the purge below: a run that has lost the row must find out
+    # here, not after it has deleted its successor's points.
+    db.set_status(doc_id, "embedding", progress=0.0, units=len(chunks), token=token)
     vector_store.ensure_text_collection()
     vector_store.delete_video(user_id, doc_id)
 
@@ -97,8 +100,9 @@ def t_embed_index(doc_id: str, user_id: str, chunks: list[dict],
                       for c in batch],
             ns=ns, start=start)
         total += len(batch)
-        db.set_progress(doc_id, total / len(chunks))
+        db.set_progress(doc_id, total / len(chunks), token=token)
 
     db.set_status(doc_id, "indexed", frame_count=total,
-                  embed_version=config.TEXT_EMBED_VERSION, progress=1.0)
+                  embed_version=config.TEXT_EMBED_VERSION, progress=1.0,
+                  token=token)
     return total

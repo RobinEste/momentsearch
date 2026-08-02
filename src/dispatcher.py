@@ -21,10 +21,7 @@ at worst mildly over-admitting (harmless; Prefect still caps execution).
 """
 from __future__ import annotations
 
-import threading
-import time
-
-from . import config, db, jobs
+from . import config, db, jobs, ticker
 
 
 def dispatch_once() -> int:
@@ -45,25 +42,16 @@ def dispatch_once() -> int:
             # Couldn't reach Prefect — put it back so it's retried next tick.
             db.set_status(row["id"], "pending", error=f"dispatch: {exc}")
     if claimed:
-        print(f"[dispatch] admitted {len(claimed)} source(s) "
+        print(f"[dispatch] admitted {', '.join(r['id'] for r in claimed)} "
               f"({db.count_inflight()}/{config.DISPATCH_MAX_INFLIGHT} in flight)")
     return len(claimed)
 
 
-def run_forever() -> None:
-    print(f"[dispatch] fair scheduler on — max in-flight "
-          f"{config.DISPATCH_MAX_INFLIGHT}, tick {config.DISPATCH_INTERVAL_S}s")
-    while True:
-        try:
-            dispatch_once()
-        except Exception as exc:  # never let the scheduler thread die
-            print(f"[dispatch] error: {type(exc).__name__}: {exc}")
-        time.sleep(config.DISPATCH_INTERVAL_S)
-
-
 def start_in_background() -> None:
     """Start the dispatcher as a daemon thread (no-op if fair dispatch is off)."""
-    if not config.ENABLE_FAIR_DISPATCH:
-        print("[dispatch] fair dispatch disabled — FIFO (immediate enqueue)")
-        return
-    threading.Thread(target=run_forever, daemon=True, name="dispatcher").start()
+    ticker.start(
+        "dispatch", dispatch_once, config.DISPATCH_INTERVAL_S,
+        enabled=config.ENABLE_FAIR_DISPATCH,
+        on_start=(f"[dispatch] fair scheduler on — max in-flight "
+                  f"{config.DISPATCH_MAX_INFLIGHT}, tick {config.DISPATCH_INTERVAL_S}s"),
+        on_disabled="[dispatch] fair dispatch disabled — FIFO (immediate enqueue)")
