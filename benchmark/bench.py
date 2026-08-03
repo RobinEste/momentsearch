@@ -37,11 +37,51 @@ TERMINAL = ("indexed", "skipped", "failed")
 QUERIES = ROOT / "benchmark" / "queries.jsonl"
 
 # The backfill the load-bearing gates run against: real documents, fetched over
-# the network, parsed and embedded like any other. Small enough that a run is
-# minutes rather than an afternoon, large enough that search has something to
-# compete with. Override with BENCH_CORPUS=<comma-separated urls> to point the
-# benchmark at your own set.
+# the network, parsed and embedded like any other. Override with
+# BENCH_CORPUS=<comma-separated urls> to point the benchmark at your own set.
+#
+# SIZED, not picked. The first eight below are the retrieval papers this product
+# is built on and they used to be the whole list. Measured against them, both
+# load-bearing gates were unmeasurable rather than failed:
+#
+#   * search_p95_during_ingest_ratio compares search latency on a quiet system
+#     against search latency during the backfill. Eight short papers drained in
+#     59s while the "during" measurement — real /ask_stream calls at ~5s each —
+#     needed about three minutes, so the second half ran on a system that was
+#     already idle again. bench.py catches this itself (`load_held`) and fails
+#     the gate rather than reporting the ~1.0 ratio two idle systems produce.
+#   * ingest_throughput_chunks_per_s then measured its own wall clock from
+#     registration to the moment it FIRST looked, which was after that idle
+#     measurement had run its course: 394 chunks over a reported 181s, where the
+#     worker logs put the real window at 59.4s. 2.17 chunks/s reported, 6.6 real.
+#
+# So the corpus has to outlast the measurement standing next to it. Second lever,
+# from the same logs: per-document cost dominates. 20 chunks took 20.1s and 78
+# chunks took 23.2s, so chunks/s here mostly reports how many chunks are in an
+# average document, not how fast the system is. The eight short papers averaged
+# 49 chunks. The twelve added below are the long-form model reports and surveys
+# in the same lineage — same subject, an order of magnitude more pages.
+#
+# Say the quiet part out loud, because the two are easy to confuse: enlarging the
+# corpus makes both gates MEASURE something, and it also raises chunks/s without
+# the system getting faster. PRODUCT_EVAL.md has to state that chunks/s is a
+# function of document size, or the number reads as a speed it is not.
+#
+# Deliberately NOT here: arxiv.org/pdf/2108.07258 (On the Opportunities and Risks
+# of Foundation Models, ~200pp). It is the obvious stress test and that is the
+# problem — the `parsing` budget is a flat 300s with no per-page term
+# (src/config.py), so it is the one document that might be reaped mid-run, and a
+# reaped-then-retried row would inflate exactly the window being measured. Add it
+# as its own observation, not inside the run you need to be readable.
+#
+# Also NOT here, and for a sharper reason: BENCH_VICTIM (2303.18223, see
+# resilience()). A document's id is derived from its normalized uri, so a victim
+# that is already in the backfill is the SAME row — resilience() would then kill
+# a worker over one of the eight it just registered instead of over the large
+# source it registers deliberately, and its "wait until the victim is mid-
+# embedding" step would be watching the wrong thing. Keep the two lists disjoint.
 CORPUS = [u for u in os.getenv("BENCH_CORPUS", "").split(",") if u.strip()] or [
+    # The method papers: short, dense, 6-21 pages each.
     "https://arxiv.org/pdf/1706.03762",   # Attention Is All You Need
     "https://arxiv.org/pdf/1810.04805",   # BERT
     "https://arxiv.org/pdf/1908.10084",   # Sentence-BERT
@@ -50,6 +90,19 @@ CORPUS = [u for u in os.getenv("BENCH_CORPUS", "").split(",") if u.strip()] or [
     "https://arxiv.org/pdf/2007.01282",   # FiD
     "https://arxiv.org/pdf/2112.09118",   # Contriever
     "https://arxiv.org/pdf/2212.10496",   # HyDE
+    # Long-form: model reports, benchmarks and surveys from the same literature.
+    "https://arxiv.org/pdf/1910.10683",   # T5
+    "https://arxiv.org/pdf/2005.14165",   # GPT-3
+    "https://arxiv.org/pdf/2101.00027",   # The Pile
+    "https://arxiv.org/pdf/2104.08663",   # BEIR
+    "https://arxiv.org/pdf/2201.11903",   # Chain-of-Thought prompting
+    "https://arxiv.org/pdf/2203.02155",   # InstructGPT
+    "https://arxiv.org/pdf/2211.05100",   # BLOOM
+    "https://arxiv.org/pdf/2210.11416",   # Scaling Instruction-Finetuned LMs
+    "https://arxiv.org/pdf/2302.13971",   # LLaMA
+    "https://arxiv.org/pdf/2307.09288",   # Llama 2
+    "https://arxiv.org/pdf/2312.10997",   # Retrieval-Augmented Generation: a survey
+    "https://arxiv.org/pdf/2402.19473",   # RAG for AI-Generated Content: a survey
 ]
 
 # How the worker is taken down and brought back for --resilience. `kill` is a
@@ -237,39 +290,103 @@ def _sse_citations(q, timeout=90):
     return None
 
 
+class _QueueMonitor(threading.Thread):
+    """Watches a backfill from the moment it is registered.
+
+    measure_throughput used to sample the queue itself, and it is only reached
+    AFTER the search-under-load gate has finished — which on any corpus that
+    drains quickly is after the queue is already empty. Two numbers came out
+    wrong for the one reason: `peak` reported 0 because nothing was ever in
+    flight when it first looked, and `elapsed` ran to that first look rather
+    than to the last source finishing, charging the previous gate's runtime to
+    ingest. Measured on the eight-paper corpus: a 59.4s ingest window reported
+    as 181s, 6.6 chunks/s reported as 2.17.
+
+    So the sampling now starts where the clock starts. Daemon, because a
+    benchmark that hangs on its own instrumentation is worse than one that
+    loses a sample.
+    """
+
+    def __init__(self, ids, t0, interval_s=2.0, timeout_s=1800):
+        super().__init__(daemon=True, name="queue-monitor")
+        self.ids, self.t0 = ids, t0
+        self.interval_s, self.deadline = interval_s, t0 + timeout_s
+        self.peak = 0
+        self.finished_at = None      # None: never observed all-terminal
+        self.states = {i: None for i in ids}
+
+    def run(self):
+        while time.time() < self.deadline:
+            try:
+                self.states = _states(self.ids)
+            except Exception as exc:  # noqa: BLE001
+                # The thread must outlive a blip. If it died here instead,
+                # finished_at would stay None, and measure_throughput would sit
+                # out its whole timeout waiting for a sample that never comes —
+                # a transient 502 turning into a 15-minute hang.
+                print(f"  ! queue monitor: {type(exc).__name__}: {exc}")
+                time.sleep(self.interval_s)
+                continue
+            self.peak = max(self.peak, sum(
+                1 for s in self.states.values()
+                if s not in TERMINAL and s != "pending"))
+            if self.states and all(s in TERMINAL for s in self.states.values()):
+                self.finished_at = time.time()
+                return
+            time.sleep(self.interval_s)
+
+
 def run_backfill(uris, label):
-    """Register a batch and return (ids, started_at). Registration is the cheap
-    half — these return in milliseconds and the work happens on the queue."""
+    """Register a batch and return (ids, started_at, monitor). Registration is
+    the cheap half — these return in milliseconds and the work happens on the
+    queue, which is what the monitor is there to watch."""
     print(f"[{label}] registering {len(uris)} documents…")
     t0 = time.time()
     ids = [i for i in (_register(u) for u in uris) if i]
     print(f"[{label}] {len(ids)} accepted")
-    return ids, t0
+    monitor = _QueueMonitor(ids, t0)
+    monitor.start()
+    return ids, t0, monitor
 
 
-def measure_throughput(ids, t0, timeout_s=900):
+def measure_throughput(monitor, timeout_s=900):
     """Chunks per second across a backfill, wall clock from first register to
     the last source reaching a terminal state.
+
+    Both ends of that clock come from the monitor run_backfill started, not from
+    this function: it is called after the gate before it and would otherwise be
+    timing that gate as well as the ingest (see _QueueMonitor). This blocks only
+    for whatever is STILL running by the time it is reached, which on a corpus
+    large enough for the ratio gate is the normal case.
 
     Counts only what actually landed: `frame_count` doubles as the chunk count
     for documents, and a source that failed contributes neither its chunks nor
     an excuse.
     """
-    peak = 0
+    ids = monitor.ids
     end, last = time.time() + timeout_s, 0.0
-    while time.time() < end:
-        states = _states(ids)
-        peak = max(peak, sum(1 for s in states.values() if s not in TERMINAL and s != "pending"))
-        if all(s in TERMINAL for s in states.values()):
-            break
+    while monitor.finished_at is None and time.time() < end:
         if time.time() - last >= 15:
             last = time.time()
-            done = sum(1 for s in states.values() if s in TERMINAL)
-            print(f"  [backfill {time.time()-t0:.0f}s] {done}/{len(ids)} finished, "
-                  f"{peak} concurrent at peak")
-        time.sleep(3)
-    states = _states(ids)
-    elapsed = time.time() - t0
+            done = sum(1 for s in monitor.states.values() if s in TERMINAL)
+            print(f"  [backfill {time.time()-monitor.t0:.0f}s] {done}/{len(ids)} "
+                  f"finished, {monitor.peak} concurrent at peak")
+        time.sleep(1)
+    # Whether the ingest outlasted the gate before this one is not a detail: it
+    # is exactly what decides whether search_p95_during_ingest_ratio measured a
+    # loaded system or two idle ones. Printed either way, so a reader of the log
+    # can tell which of the two happened without reconstructing it from
+    # timestamps.
+    if monitor.finished_at:
+        drained = monitor.finished_at - monitor.t0
+        slack = time.time() - monitor.finished_at
+        print(f"  [backfill] drained {drained:.0f}s after registration, "
+              f"{slack:.0f}s before this gate was reached"
+              + (" — the ratio gate ran partly on an idle system"
+                 if slack > 5 else ""))
+    states, elapsed = monitor.states, (
+        (monitor.finished_at or time.time()) - monitor.t0)
+    peak = monitor.peak
     by_id = {s["id"]: s for s in _sources()}
     chunks = sum((by_id.get(i, {}).get("frame_count") or 0)
                  for i, st in states.items() if st == "indexed")
@@ -306,7 +423,7 @@ def resilience():
     Without (1), (2) and (3) are answers to a question nobody asked.
     """
     victim_uri = os.getenv("BENCH_VICTIM", "https://arxiv.org/pdf/2303.18223")
-    ids, _ = run_backfill(CORPUS, "resilience")
+    ids, _, _ = run_backfill(CORPUS, "resilience")
     victim = _register(victim_uri, title="resilience victim (large)")
     if not ids or not victim:
         print("  ! nothing registered — cannot test")
@@ -399,7 +516,7 @@ def main():
     # is the way this gate goes green while proving no decoupling at all.
     print("[idle] measuring search p95 on a quiet system…")
     idle = measure_search_p95()
-    ids, t0 = run_backfill(CORPUS, "backfill")
+    ids, _, monitor = run_backfill(CORPUS, "backfill")
     busy_at_start = sum(1 for s in _states(ids).values() if s not in TERMINAL)
     print(f"[during] measuring search p95 with {busy_at_start} source(s) in the queue…")
     during = measure_search_p95()
@@ -416,7 +533,7 @@ def main():
          SLA["search_p95_during_ingest_ratio_max"])
 
     # 3. ingestion throughput — the same backfill, timed to completion.
-    throughput = measure_throughput(ids, t0)
+    throughput = measure_throughput(monitor)
     gate("ingest_throughput_chunks_per_s", round(throughput, 2),
          throughput >= SLA["ingest_throughput_min_chunks_per_s"], SLA["ingest_throughput_min_chunks_per_s"])
 
