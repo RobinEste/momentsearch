@@ -32,12 +32,14 @@ from ..rag.embeddings import embed_jpegs
 from . import fetch as fetch_mod
 from .dedup import dedup
 from .frames import Frame, sample
+from .retry import retry_unless_orphaned
 from .run import ingest_run
 
 _UPLOAD_POOL = 8  # concurrent thumbnail PUTs (I/O-bound)
 
 
-@task(name="fetch", retries=2, retry_delay_seconds=[30, 120])
+@task(name="fetch", retries=2, retry_delay_seconds=[30, 120],
+      retry_condition_fn=retry_unless_orphaned)
 def t_fetch(video_id: str, user_id: str, token: str) -> str:
     """Source video -> worker scratch file; duplicate check via source_hash.
 
@@ -106,7 +108,8 @@ def t_sample(video_id: str, user_id: str, path: str, token: str) -> list[Frame]:
     return kept
 
 
-@task(name="embed-index", retries=2, retry_delay_seconds=60)
+@task(name="embed-index", retries=2, retry_delay_seconds=60,
+      retry_condition_fn=retry_unless_orphaned)
 def t_embed_index(video_id: str, user_id: str, frames: list[Frame],
                   token: str) -> int:
     """Batched CLIP embeddings -> idempotent multi-tenant Qdrant upsert."""
@@ -135,7 +138,8 @@ def t_embed_index(video_id: str, user_id: str, frames: list[Frame],
     return total
 
 
-@task(name="transcript", retries=1, retry_delay_seconds=30)
+@task(name="transcript", retries=1, retry_delay_seconds=30,
+      retry_condition_fn=retry_unless_orphaned)
 def t_transcript(video_id: str, user_id: str) -> int:
     """YouTube captions -> time chunks -> bge -> text collection (the 2nd
     branch). Best-effort: uploads have no captions, some videos have none, and

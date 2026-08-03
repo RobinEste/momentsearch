@@ -18,11 +18,13 @@ from .. import config, db
 from ..rag import vector_store
 from ..rag.embeddings import embed_docs
 from . import fetch as fetch_mod
+from .retry import retry_unless_orphaned
 
 _EMBED_BATCH = 64
 
 
-@task(name="fetch-document", retries=2, retry_delay_seconds=[30, 120])
+@task(name="fetch-document", retries=2, retry_delay_seconds=[30, 120],
+      retry_condition_fn=retry_unless_orphaned)
 def t_fetch(doc_id: str, user_id: str, token: str) -> tuple[str, str | None]:
     """Source PDF -> worker scratch file; duplicate check on the CONTENT hash.
 
@@ -67,7 +69,8 @@ def t_fetch(doc_id: str, user_id: str, token: str) -> tuple[str, str | None]:
     return str(path), row.get("title")
 
 
-@task(name="embed-index-document", retries=2, retry_delay_seconds=60)
+@task(name="embed-index-document", retries=2, retry_delay_seconds=60,
+      retry_condition_fn=retry_unless_orphaned)
 def t_embed_index(doc_id: str, user_id: str, chunks: list[dict], token: str,
                   *, kind: str = "paper", ns: str = "page") -> int:
     """Batched bge embeddings -> idempotent upsert into the shared text
