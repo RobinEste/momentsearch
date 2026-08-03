@@ -54,7 +54,18 @@ CREATE TABLE IF NOT EXISTS ms_videos (
     -- no process has EVER vouched for this row (scheduled, not yet started) —
     -- and silence cannot be read against it. Written only by src/heartbeat.py,
     -- cleared wherever the row is admitted or requeued.
-    last_heartbeat_at TIMESTAMPTZ
+    last_heartbeat_at TIMESTAMPTZ,
+    -- The Prefect run scheduled for this row, so deleting the source can also
+    -- call the run off. Without it a delete only removes the manifest row while
+    -- the run stays queued in Prefect, wakes up on a worker, spends a subprocess
+    -- and a torch import, and dies on LostOwnership — capacity spent on a source
+    -- nobody wants any more. Measured: benchmark/bench.py's 30 accept-latency
+    -- probes are registered, dispatched and deleted within seconds, and their
+    -- orphaned runs then filled every worker slot for ~8 minutes, which is what
+    -- the throughput gate ended up measuring. Kept after the run lands (it is
+    -- the id of the LAST run scheduled, not a live lock) — the status says
+    -- whether cancelling it is still worth a call.
+    flow_run_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS ms_videos_user_idx   ON ms_videos (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ms_videos_status_idx ON ms_videos (status);
@@ -72,6 +83,9 @@ ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'video
 ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS phase_deadline TIMESTAMPTZ;
 ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
 ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS run_token TEXT;
+-- Same reading: NULL means "no run was ever scheduled for this row", which is
+-- exactly what an existing row deserves — there is no id to cancel.
+ALTER TABLE ms_videos ADD COLUMN IF NOT EXISTS flow_run_id TEXT;
 
 -- Bring-your-own-model: a tenant's hosted LLM endpoint (vLLM / Ollama / any
 -- OpenAI-compatible server, NVIDIA NIM, or Anthropic). When a row exists the

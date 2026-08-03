@@ -229,6 +229,18 @@ def delete(video_id: str, uid: str = Depends(user_id)):
     row = db.get_video(video_id)
     if row is None or row["user_id"] != uid:
         raise HTTPException(404, "Video not found.")
+    # Call off the scheduled run FIRST, and only while it could still do work.
+    # First, because a run that is already executing may otherwise write points
+    # after vector_store.delete_video() has run, leaving orphans behind the row
+    # that would have explained them.
+    #
+    # NOT_INFLIGHT_STATUSES, not TERMINAL_STATUSES: `pending` has to be excluded
+    # too. A pending row was never handed to Prefect, so there is nothing to
+    # cancel, and asking anyway costs a round trip — measured at ~0.9s per
+    # delete across bench.py's 30-probe cleanup, which is time the dispatcher
+    # spends admitting more of those probes.
+    if row["status"] not in config.NOT_INFLIGHT_STATUSES:
+        jobs.cancel_ingest(video_id, row.get("flow_run_id"))
     vector_store.delete_video(uid, video_id)
     storage.delete_prefix(storage.frame_prefix(uid, video_id))
     if row.get("storage_key"):

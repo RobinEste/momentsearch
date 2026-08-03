@@ -268,6 +268,23 @@ def videos_by_ids(ids: list[str]) -> dict[str, dict]:
     return {r["id"]: r for r in rows}
 
 
+def set_flow_run(video_id: str, flow_run_id: str) -> None:
+    """Record which Prefect run was scheduled for this row.
+
+    Deliberately not guarded by run_token: this is written at SCHEDULING time,
+    when the row is `queued` and no process owns it yet — a token guard would
+    reject every write. It is a note about what was asked of Prefect, not a
+    claim on the row, and the delete path is its only reader.
+
+    Not raising when the row is gone is the point: the source can be deleted
+    between enqueue() and this write, and failing here would turn a successful
+    schedule into a 500 for a row that no longer matters.
+    """
+    with pool().connection() as conn:
+        conn.execute("UPDATE ms_videos SET flow_run_id = %s WHERE id = %s",
+                     (flow_run_id, video_id))
+
+
 def delete_video(video_id: str) -> None:
     with pool().connection() as conn:
         conn.execute("DELETE FROM ms_videos WHERE id = %s", (video_id,))

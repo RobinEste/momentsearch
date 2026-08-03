@@ -16,14 +16,14 @@ using `db.<name>` — this module re-exports all of it.
 from ._core import LostOwnership, init_schema, pool
 from .llm import delete_user_llm, get_user_llm, set_user_llm
 from .manifest import (delete_video, find_duplicate, get_video, heartbeat,
-                       list_videos, requeue, set_progress, set_status,
-                       start_run, upsert_pending, videos_by_ids)
+                       list_videos, requeue, set_flow_run, set_progress,
+                       set_status, start_run, upsert_pending, videos_by_ids)
 from .queue import count_inflight, reap_stale, wfq_claim
 
 __all__ = [
     "LostOwnership", "count_inflight", "delete_user_llm", "delete_video",
     "find_duplicate", "get_user_llm", "get_video", "heartbeat", "init_schema",
-    "list_videos", "pool", "reap_stale", "requeue", "set_progress",
-    "set_status", "set_user_llm", "start_run", "upsert_pending",
-    "videos_by_ids", "wfq_claim",
+    "list_videos", "pool", "reap_stale", "requeue", "set_flow_run",
+    "set_progress", "set_status", "set_user_llm", "start_run",
+    "upsert_pending", "videos_by_ids", "wfq_claim",
 ]
