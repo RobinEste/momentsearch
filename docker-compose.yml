@@ -15,36 +15,119 @@
 #      fresh clone with no secret manager. Marked optional so the stack also
 #      starts when no .env exists.
 x-app-env: &app-env
-  - CLIP_SERVICE_URL=${CLIP_SERVICE_URL:-http://clip:8001}
+  # Without this, Python buffers stdout when it is a pipe rather than a tty, so
+  # `docker compose logs` shows nothing from the app until the buffer happens to
+  # flush. Measured on a live crash test: the worker had run a full ingest and
+  # emitted not one line. That matters beyond tidiness — the reaper's "[reap]
+  # <id> ... requeued" line is the only durable record that a source was lost
+  # and re-offered, since the reason it writes to the row is overwritten by the
+  # next status write of the replacement run.
+  #
+  # Mapping form, not a list, and that is load-bearing: `api` has to inherit all
+  # of this AND override one key (it uses the interactive clip lane, the workers
+  # use the batch one). YAML can merge a mapping into another mapping (`<<:`);
+  # it cannot merge into a sequence. A bare key with no value behaves exactly as
+  # the bare list entry it replaces — taken from the shell that ran compose, and
+  # simply not passed when unset there.
+  PYTHONUNBUFFERED: "1"
+  CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
   # One worker process executes up to WORKER_CONCURRENCY runs at once. With the
   # clip service doing the embedding, each run is light (download + ffmpeg
   # only) — raise this without adding RAM for models.
-  - WORKER_CONCURRENCY=2
-  - DATABASE_URL
-  - ADMIN_TOKEN
-  - LLM_PROVIDER
-  - LLM_API_KEY
-  - LLM_MODEL
-  - QDRANT_URL
-  - QDRANT_API_KEY
-  - QDRANT_COLLECTION
-  - PREFECT_API_URL
-  - PREFECT_API_KEY
-  - SEED_SAMPLE_VIDEOS
+  WORKER_CONCURRENCY: "2"
+  # How many runs the fair dispatcher admits at once, across ALL workers. It
+  # defaults to WORKER_CONCURRENCY, which is one worker's capacity — right for a
+  # single replica, a hard ceiling at two. `--scale worker=2` then buys nothing:
+  # four slots exist, two are ever filled, and the throughput gate ends up
+  # measuring the dispatcher instead of the fleet. Keep at replicas x concurrency.
+  DISPATCH_MAX_INFLIGHT: ${DISPATCH_MAX_INFLIGHT:-4}
+  DATABASE_URL:
+  ADMIN_TOKEN:
+  LLM_PROVIDER:
+  LLM_API_KEY:
+  LLM_MODEL:
+  QDRANT_URL:
+  QDRANT_API_KEY:
+  QDRANT_COLLECTION:
+  PREFECT_API_URL:
+  PREFECT_API_KEY:
+  SEED_SAMPLE_VIDEOS:
 
 services:
   # The inference service: ONE warm CLIP model behind a URL. api + worker send
   # batches here instead of each flow run paying a fresh ~15-30s model load.
   # Scaling embedding = scaling THIS service (CPU here; same container on a
   # GPU machine later — only CLIP_SERVICE_URL changes).
+  # BATCH lane — the workers' embedding, capped at 11 of the 12 cores.
+  #
+  # An operating point on a curve, not a default. Measured at three settings
+  # with everything else held still (20 documents = 2380 chunks, 2 workers,
+  # lanes split):
+  #
+  #   shared lane   285.5s   8.34 c/s   ratio not measurable (see below)
+  #   split, no cap  >482s      —       read path 4.44x idle
+  #   split, cpus 8    406s   5.87 c/s  ratio 1.12
+  #   split, cpus 11   337s   7.05 c/s  ratio 0.86   <- this
+  #
+  # Removing the cap made BOTH sides worse, which is the part that is easy to
+  # get backwards: nothing here is short of cores, torch simply takes all twelve
+  # for every batch, and the oversubscription costs the ingest as much as it
+  # costs the query it delays. Same shape as the semaphore in clip_service.py,
+  # which also made ingest faster rather than slower. The real trade lives
+  # between 8 and 12, not between capped and uncapped.
+  #
+  # 11 because the throughput gate (8 c/s) had no margin and the ratio gate had
+  # plenty. It still misses 8: reaching it needs a ~297s window, and no cap
+  # setting got there with the lanes split. The bottleneck at that point is the
+  # embedding capacity of one CPU clip service, not how it is divided — which is
+  # what a second machine buys and a laptop cannot (see fly.toml).
+  #
+  # Do NOT read the 0.86 as "ingest makes search faster". Idle p95 across three
+  # runs was 5420 / 5975 / 6454ms; the spread of the measurement is wider than
+  # the effect it measures, because retrieval is under a second of a 5-6s
+  # LLM-dominated answer. Retrieval itself does degrade, measurably: 419 ->
+  # 873ms (2.09x). The end-to-end gate simply cannot see it.
+  #
+  # Move this and both numbers move. Re-run bench.py, not one gate.
   clip:
+    build: .
+    command: uvicorn src.clip_service:app --host 0.0.0.0 --port 8001
+    cpus: 11
+    environment:
+      # How many ingest batches may hold this service at once. The read path's
+      # embeds are exempt, which is the point (src/clip_service.py). 0 turns the
+      # limit off and restores the behaviour that made search 43x slower during
+      # a backfill.
+      - CLIP_BATCH_CONCURRENCY=${CLIP_BATCH_CONCURRENCY:-2}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - hf_cache:/root/.cache     # model weights cached across restarts
+    restart: unless-stopped
+
+  # INTERACTIVE lane — the same image, serving only the API's query embeds.
+  #
+  # Measured with one shared instance and a 20-document backfill in flight:
+  # embed_text on the read path went from a 64ms idle median to 1642ms, peaking
+  # at 8953ms, and 102.7% of /ask_stream's degradation sat in retrieve() while
+  # the LLM call did not move at all. A semaphore inside the one service (see
+  # clip_service.py) took the median down by about a third and no further —
+  # it bounds how MANY batches run, not how much CPU one batch takes.
+  #
+  # So the lanes are split at the process, not inside it. This one never sees a
+  # batch request, so its threadpool and its torch threads are not shared with
+  # ingest. It costs a second copy of the runtime (~4GiB resident, of which only
+  # 580MB is weights), which is why the earlier attempt at this was abandoned on
+  # a 7.65GiB Docker allocation and needs ~16GiB to fit.
+  clip-query:
     build: .
     command: uvicorn src.clip_service:app --host 0.0.0.0 --port 8001
     env_file:
       - path: .env
         required: false
     volumes:
-      - hf_cache:/root/.cache     # model weights cached across restarts
+      - hf_cache:/root/.cache
     restart: unless-stopped
 
   # STARTUP GATE — indexes the four sample talks and exits. api + worker wait
@@ -76,12 +159,18 @@ services:
     env_file:
       - path: .env
         required: false
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # The one key that differs from every other service: the read path embeds
+      # against the interactive lane, so a backfill on `clip` cannot queue in
+      # front of a query. This override is the entire topology change — the
+      # workers keep the shared default above.
+      CLIP_SERVICE_URL: http://clip-query:8001
     volumes:
       - ./data:/app/data          # STORAGE_PROVIDER=local only (dev)
       - hf_cache:/root/.cache
     depends_on:
-      clip:
+      clip-query:
         condition: service_started
       seed:
         condition: service_completed_successfully   # UI up only after samples ready

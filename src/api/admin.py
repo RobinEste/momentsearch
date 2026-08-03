@@ -155,17 +155,33 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id)):
     # code path would leave documents pending forever while videos sail past —
     # /api/videos has this branch, and without it the two write paths disagree
     # about what "registered" means.
+    # `status` is the documented word for "accepted for ingest", not a reading of
+    # the row: the README's contract is {id, status:"pending", kind}. Since
+    # upsert_pending now leaves an in-flight row alone, the two can differ, so
+    # the row's real state rides alongside instead of overwriting the promise.
+    accepted = {"id": row["id"], "kind": row["kind"], "status": "pending",
+                **({"current_status": row["status"]}
+                   if row["status"] != "pending" else {})}
+    # Already busy: the guard kept it, so enqueueing here would put a second run
+    # on a source a worker is holding.
+    if row["status"] not in config.NOT_INFLIGHT_STATUSES:
+        return accepted
     if not config.ENABLE_FAIR_DISPATCH and kind in jobs.dispatchable_kinds():
-        flow_run_id = jobs.enqueue(row["id"], uid, kind)
-        return {"id": row["id"], "kind": row["kind"], "status": row["status"],
-                "flow_run_id": flow_run_id}
-    return {"id": row["id"], "kind": row["kind"], "status": row["status"]}
+        return {**accepted, "flow_run_id": jobs.enqueue(row["id"], uid, kind)}
+    return accepted
 
 
 # ── Unified read (videos + documents) ────────────────────────────────────────
 
 _SOURCE_FIELDS = ("id", "kind", "source", "url", "title", "status", "error",
-                  "attempts", "created_at", "updated_at")
+                  "attempts", "created_at", "updated_at",
+                  # How much this source actually produced: frames for a video,
+                  # chunks for a document. Without it the unified view can say a
+                  # source is 'indexed' without saying how much of it there is,
+                  # and a benchmark measuring chunks per second reads eight
+                  # zeroes and reports a throughput of nought. Additive, so what
+                  # this endpoint already promised is unchanged.
+                  "frame_count")
 
 
 def _source(row: dict) -> dict:

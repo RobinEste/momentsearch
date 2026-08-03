@@ -55,8 +55,11 @@ def main():
     vector_store.ensure_collection()  # up front, not mid-first-ingest
     # Fair scheduler (WFQ): admits pending videos round-robin across users so
     # one bulk uploader can't starve everyone else (src/dispatcher.py).
-    from . import dispatcher
+    from . import dispatcher, reaper
     dispatcher.start_in_background()
+    # Crash recovery: hands rows whose worker died back to that dispatcher.
+    # Started after it, so the first tick has somewhere to hand them to.
+    reaper.start_in_background()
     limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
     # serve() talks to Prefect Cloud on startup; a transient outage (e.g. a 503)
     # used to crash the worker permanently and stop the machine. Self-heal:

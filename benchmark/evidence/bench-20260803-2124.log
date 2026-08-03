@@ -1,0 +1,31 @@
+A new release of infisical is available: 0.43.89 -> 0.43.116
+
+To update, run: brew update && brew upgrade infisical
+
+[90m2026-08-03T17:26:23+02:00[0m [32mINF[0m Injecting 12 Infisical secrets into your application process
+[PASS] accept_latency_p95_ms: 218.0 (target 300)
+[idle] measuring search p95 on a quiet system…
+[backfill] registering 20 documents…
+[backfill] 20 accepted
+[during] measuring search p95 with 20 source(s) in the queue…
+  idle p95 6454ms · during 5556ms · queue 20 -> 6 unfinished
+[PASS] search_p95_during_ingest_ratio: 0.86 (target 1.3)
+  [backfill 194s] 13/20 finished, 4 concurrent at peak
+  [backfill 209s] 15/20 finished, 4 concurrent at peak
+  [backfill 224s] 15/20 finished, 4 concurrent at peak
+  [backfill 239s] 15/20 finished, 4 concurrent at peak
+  [backfill 254s] 15/20 finished, 4 concurrent at peak
+  [backfill 269s] 17/20 finished, 4 concurrent at peak
+  [backfill 284s] 18/20 finished, 4 concurrent at peak
+  [backfill 299s] 18/20 finished, 4 concurrent at peak
+  [backfill 314s] 18/20 finished, 4 concurrent at peak
+  [backfill 329s] 18/20 finished, 4 concurrent at peak
+  [backfill] drained 337s after registration, 1s before this gate was reached
+  2380 chunks over 337s (20/20 indexed, at most 4 running at once)
+[FAIL] ingest_throughput_chunks_per_s: 7.05 (target 8)
+  miss: 'What was used as the control group in the trial that license'
+[PASS] recall_at_10: 0.967 (target 0.7 over 30 labeled queries)
+wrote benchmark/results-20260803-1726.json
+
+SLA FAILURES: ingest_throughput_chunks_per_s
+failed to wait for command termination: exit status 1

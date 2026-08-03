@@ -20,6 +20,8 @@ Endpoints:
 from __future__ import annotations
 
 import base64
+import contextlib
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -28,6 +30,34 @@ from pydantic import BaseModel
 from . import config
 from .config import CLIP_MODEL
 from .rag import embeddings
+
+# Batch work yields to interactive work.
+#
+# Every endpoint here is a sync `def`, so FastAPI runs it in a threadpool, and
+# torch inside it helps itself to every core. One ingest flow posting a whole
+# document's chunks is one long op holding those cores; four flows are four,
+# oversubscribing a 12-core box, and a search needing a 64ms query embed then
+# waits for a scheduling slice rather than for compute. Measured here with a
+# 20-document backfill in flight: embed_text on the read path went from a 64ms
+# idle median to 2788ms (43x), peaking at 20397ms (318x). A 318x factor is not
+# CPU sharing, it is queueing.
+#
+# The textbook fix is a second replica for the read path, and it does not fit:
+# this container holds ~4.0GiB of the 7.65GiB Docker has here, so a twin OOMs.
+# Capacity cannot be bought, only allocated — hence a queue discipline instead
+# of a copy. The batch endpoints take a slot; /embed/text and /embed/query never
+# do, so an interactive request is admitted while ingest waits.
+#
+# A fairness knob, not a throughput one: it bounds how much of the service
+# ingest may hold at once, and the ingest gate is what says whether that cost is
+# acceptable. Re-measure BOTH sides when changing it.
+_BATCH_SLOTS = (threading.Semaphore(config.CLIP_BATCH_CONCURRENCY)
+                if config.CLIP_BATCH_CONCURRENCY > 0 else None)
+
+
+def _batch_slot():
+    """Hold a batch slot for a block (a no-op when the limit is disabled)."""
+    return _BATCH_SLOTS if _BATCH_SLOTS is not None else contextlib.nullcontext()
 
 
 @asynccontextmanager
@@ -63,11 +93,16 @@ def healthz():
     return {"ok": True, "model": CLIP_MODEL, "dim": embeddings.embedding_dim()}
 
 
+# ── Batch endpoints (ingest) — these take a slot ─────────────────────────────
+
 @app.post("/embed/images")
 def embed_images(req: ImagesRequest):
     jpegs = [base64.b64decode(j) for j in req.jpegs_b64]
-    return {"vectors": embeddings.embed_jpegs_local(jpegs).tolist()}
+    with _batch_slot():
+        return {"vectors": embeddings.embed_jpegs_local(jpegs).tolist()}
 
+
+# ── Interactive endpoints (the read path) — never blocked by a batch ─────────
 
 @app.post("/embed/text")
 def embed_text(req: TextRequest):
@@ -78,7 +113,8 @@ def embed_text(req: TextRequest):
 
 @app.post("/embed/docs")
 def embed_docs(req: DocsRequest):
-    return {"vectors": embeddings.embed_docs_local(req.texts).tolist()}
+    with _batch_slot():
+        return {"vectors": embeddings.embed_docs_local(req.texts).tolist()}
 
 
 @app.post("/embed/query")

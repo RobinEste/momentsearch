@@ -1,0 +1,16 @@
+A new release of infisical is available: 0.43.89 -> 0.43.116
+
+To update, run: brew update && brew upgrade infisical
+
+[90m2026-08-03T21:42:37+02:00[0m [32mINF[0m Injecting 12 Infisical secrets into your application process
+[PASS] app_up: GET / -> 200
+[PASS] documents_async: POST /admin/documents -> 202 in 186ms
+[PASS] sources_status: GET /admin/sources -> 200, kinds=['deck', 'paper', 'video']
+[PASS] paper_indexed: page-locator citation present: True
+[PASS] deck_indexed: slide-locator citation present: True
+[PASS] cross_source: kinds across answers: ['deck', 'paper', 'video']
+[PASS] grounded: 6 citations, all with text+locator: True
+[FAIL] decoupled: run `python benchmark/bench.py` — search p95 during ingest <= 1.3x idle
+[PASS] RED_LINE_canary_clean: clean
+
+Wrote /Users/robin/ODIN/resources/opleidingen/actief/agent-engineering-bootcamp/momentsearch/eval/REPORT.md

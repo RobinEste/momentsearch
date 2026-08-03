@@ -36,3 +36,6 @@ MULTIMODAL_RETRIEVAL.md
 .idea/
 .vscode/
 *.log
+# ...except these. `resilience` and `deploy` are graded from submitted evidence
+# (eval/rubric.json), so a run's log is the artifact and not debris.
+!benchmark/evidence/*.log

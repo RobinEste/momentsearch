@@ -1,0 +1,22 @@
+{
+  "accept_latency_p95_ms": {
+    "value": 232.1,
+    "target": 300,
+    "pass": true
+  },
+  "search_p95_during_ingest_ratio": {
+    "value": 2.25,
+    "target": 1.3,
+    "pass": false
+  },
+  "ingest_throughput_chunks_per_s": {
+    "value": 2.17,
+    "target": 8,
+    "pass": false
+  },
+  "recall_at_10": {
+    "value": 0.967,
+    "target": "0.7 over 30 labeled queries",
+    "pass": true
+  }
+}
