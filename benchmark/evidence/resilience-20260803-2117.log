@@ -1,0 +1,42 @@
+A new release of infisical is available: 0.43.89 -> 0.43.116
+
+To update, run: brew update && brew upgrade infisical
+
+[90m2026-08-03T17:45:22+02:00[0m [32mINF[0m Injecting 12 Infisical secrets into your application process
+[resilience] registering 20 documents…
+[resilience] 20 accepted
+[resilience] waiting for doc_98a1f47e0195 to be mid-embedding…
+[resilience] killing the worker with doc_98a1f47e0195 at embedding 15%
+[resilience] worker restarted; nobody touches the queue from here on
+  [recovering 0s] embedding=3 indexed=5 parsing=1 pending=12
+  [recovering 16s] embedding=3 indexed=5 parsing=1 pending=12
+  [recovering 33s] embedding=3 indexed=5 parsing=1 pending=12
+  [recovering 49s] embedding=2 indexed=5 pending=12 queued=2
+  [recovering 65s] embedding=3 indexed=6 pending=11 queued=1
+  [recovering 81s] embedding=2 indexed=7 parsing=1 pending=10 queued=1
+  [recovering 98s] embedding=3 indexed=8 pending=9 queued=1
+  [recovering 114s] embedding=2 fetching=1 indexed=9 parsing=1 pending=8
+  [recovering 130s] embedding=3 indexed=9 parsing=1 pending=8
+  [recovering 147s] embedding=4 indexed=9 pending=8
+  [recovering 163s] embedding=4 indexed=9 pending=8
+  [recovering 180s] embedding=4 indexed=9 pending=8
+  [recovering 196s] embedding=3 indexed=10 pending=7 queued=1
+  [recovering 212s] embedding=2 indexed=11 parsing=1 pending=6 queued=1
+  [recovering 229s] embedding=2 indexed=12 pending=5 queued=2
+  [recovering 245s] embedding=2 indexed=12 parsing=2 pending=5
+  [recovering 262s] embedding=3 indexed=13 pending=4 queued=1
+  [recovering 278s] embedding=3 indexed=13 parsing=1 pending=4
+  [recovering 294s] embedding=3 indexed=13 parsing=1 pending=4
+  [recovering 311s] embedding=3 indexed=13 parsing=1 pending=4
+  [recovering 327s] embedding=1 indexed=16 pending=1 queued=3
+  [recovering 344s] embedding=2 fetching=1 indexed=16 pending=1 queued=1
+  [recovering 360s] embedding=2 indexed=16 parsing=2 pending=1
+  [recovering 377s] embedding=4 indexed=16 pending=1
+  [recovering 393s] embedding=3 indexed=17 pending=1
+  [recovering 409s] embedding=3 indexed=17 parsing=1
+  [recovering 426s] embedding=3 indexed=17 parsing=1
+  [recovering 443s] embedding=2 indexed=18 parsing=1
+  [recovering 459s] embedding=2 indexed=19
+  [recovering 475s] embedding=2 indexed=19
+[resilience] terminal=21/21 lost=0 failed=0 requeued-by-reaper=True finished-stage-reused=True
+[PASS] no_loss_under_crash: True (target 0 dropped, all indexed)
