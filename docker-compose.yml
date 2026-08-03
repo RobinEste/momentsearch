@@ -58,23 +58,41 @@ services:
   # batches here instead of each flow run paying a fresh ~15-30s model load.
   # Scaling embedding = scaling THIS service (CPU here; same container on a
   # GPU machine later — only CLIP_SERVICE_URL changes).
-  # BATCH lane — the workers' embedding, capped at 8 of the 12 cores.
+  # BATCH lane — the workers' embedding, capped at 11 of the 12 cores.
   #
-  # The cap was introduced together with the lane split, so it was measured
-  # again on its own. Removing it made BOTH sides worse, not just the read path:
-  # embed_text's median went 338ms -> 1242ms (5.4x -> 19.4x idle) and the same
-  # 20-document backfill was still running at t+482s where the capped run was
-  # past most of it by t+296s. Nothing here is fighting for scarce cores; torch
-  # simply takes all twelve for every batch, and the oversubscription costs the
-  # ingest as much as it costs the query it delays. Same shape as the semaphore
-  # in clip_service.py, which also made ingest faster rather than slower.
+  # An operating point on a curve, not a default. Measured at three settings
+  # with everything else held still (20 documents = 2380 chunks, 2 workers,
+  # lanes split):
   #
-  # So this is not a fairness-versus-throughput trade and should not be tuned as
-  # one. Both numbers move together — measure both when changing it.
+  #   shared lane   285.5s   8.34 c/s   ratio not measurable (see below)
+  #   split, no cap  >482s      —       read path 4.44x idle
+  #   split, cpus 8    406s   5.87 c/s  ratio 1.12
+  #   split, cpus 11   337s   7.05 c/s  ratio 0.86   <- this
+  #
+  # Removing the cap made BOTH sides worse, which is the part that is easy to
+  # get backwards: nothing here is short of cores, torch simply takes all twelve
+  # for every batch, and the oversubscription costs the ingest as much as it
+  # costs the query it delays. Same shape as the semaphore in clip_service.py,
+  # which also made ingest faster rather than slower. The real trade lives
+  # between 8 and 12, not between capped and uncapped.
+  #
+  # 11 because the throughput gate (8 c/s) had no margin and the ratio gate had
+  # plenty. It still misses 8: reaching it needs a ~297s window, and no cap
+  # setting got there with the lanes split. The bottleneck at that point is the
+  # embedding capacity of one CPU clip service, not how it is divided — which is
+  # what a second machine buys and a laptop cannot (see fly.toml).
+  #
+  # Do NOT read the 0.86 as "ingest makes search faster". Idle p95 across three
+  # runs was 5420 / 5975 / 6454ms; the spread of the measurement is wider than
+  # the effect it measures, because retrieval is under a second of a 5-6s
+  # LLM-dominated answer. Retrieval itself does degrade, measurably: 419 ->
+  # 873ms (2.09x). The end-to-end gate simply cannot see it.
+  #
+  # Move this and both numbers move. Re-run bench.py, not one gate.
   clip:
     build: .
     command: uvicorn src.clip_service:app --host 0.0.0.0 --port 8001
-    cpus: 8
+    cpus: 11
     environment:
       # How many ingest batches may hold this service at once. The read path's
       # embeds are exempt, which is the point (src/clip_service.py). 0 turns the

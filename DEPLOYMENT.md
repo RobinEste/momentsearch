@@ -81,9 +81,15 @@ fly auth whoami
 fly apps create momentsearch --org personal
 ```
 
-If the name is taken, pick another (e.g. `momentsearch-<you>`) and update **two
-places** in `fly.toml`: the `app = '…'` line and the `CLIP_SERVICE_URL`
-internal-DNS host (`clip.process.<app-name>.internal`).
+If the name is taken, pick another (e.g. `momentsearch-<you>`) and update **three
+places** in `fly.toml`: the `app = '…'` line, the `[env] CLIP_SERVICE_URL`
+internal-DNS host (`clip.process.<app-name>.internal`), and the api process's
+inline override of that same variable (`clip-query.process.<app-name>.internal`).
+
+The api embeds against a *different* machine than the workers on purpose.
+Sharing one meant document batches and query embeds queued in the same process:
+measured during a 20-document backfill, the read path's embed went from a 64ms
+median to 2788ms, peaking at 20397ms. See the comments in `fly.toml`.
 
 ### 3. Push secrets (once, and whenever they change)
 
