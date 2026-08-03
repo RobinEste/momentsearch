@@ -276,6 +276,11 @@ CLIP_BATCH = _int("CLIP_BATCH", 128)   # frames per embed call (inner batch is 3
 # -> in-process embedding (simple mode, no extra service). Point it at a GPU
 # machine later — nothing else changes.
 CLIP_SERVICE_URL = os.getenv("CLIP_SERVICE_URL", "").strip().rstrip("/")
+# How many BATCH embeds (ingest) the clip service runs at once. The interactive
+# endpoints the read path uses are never held by this — that asymmetry is the
+# whole point, see src/clip_service.py for what it is worth in milliseconds.
+# 0 disables the limit and restores the old free-for-all.
+CLIP_BATCH_CONCURRENCY = _int("CLIP_BATCH_CONCURRENCY", 2)
 # Vector dimension override. 0 = auto: known CLIP models resolve from a table
 # (so the API can create the collection at boot WITHOUT loading the model);
 # unknown models load the model to measure. Set explicitly for custom models.
