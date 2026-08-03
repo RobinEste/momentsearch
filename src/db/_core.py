@@ -16,7 +16,8 @@ from ..config import DATABASE_URL, HEARTBEAT_STALE_AFTER_S, NOT_INFLIGHT_STATUSE
 from ..schema import SCHEMA
 
 # Every write that moves a row's clock forward stamps the new deadline, and four
-# do: set_status, start_run, set_progress and wfq_claim. (reap_stale is not one
+# do: set_status, start_run, set_progress and the claim in queue.py's
+# _claim_fairly. (reap_stale is not one
 # of them — it NULLs the deadline, because a requeued row is waiting, not late.)
 # Three of the four have to be a single atomic statement, so the spelling is
 # shared rather than the code: make_interval is strict, so a NULL budget yields
@@ -83,7 +84,7 @@ def init_schema() -> None:
         # deadline sends them on the next tick rather than a stale window later.
         #
         # Safe to leave here permanently: any row that enters flight after this
-        # deploy gets all three columns from start_run and wfq_claim, so it can
+        # deploy gets all three columns from start_run and the claim, so it can
         # never match again.
         conn.execute(
             "UPDATE ms_videos SET last_heartbeat_at = now() - make_interval("

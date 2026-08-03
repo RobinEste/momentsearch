@@ -1,6 +1,6 @@
 """Crash recovery — the loop that puts a dead run back in the queue.
 
-Why it has to exist: wfq_claim only ever claims 'pending' (db/queue.py), while
+Why it has to exist: the dispatcher only ever claims 'pending' (db/queue.py), while
 count_inflight charges a dispatch slot for every row that is neither pending nor
 finished. A worker that dies mid-run therefore leaves a row that nothing will
 ever run again AND that holds a slot for good: with DISPATCH_MAX_INFLIGHT=2, two

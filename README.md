@@ -376,12 +376,20 @@ one user who uploads 50 videos blocks everyone behind them. Instead videos wait
 `pending` in Postgres and a **dispatcher** ([src/dispatcher.py](src/dispatcher.py))
 admits them **round-robin across users**, keeping only `DISPATCH_MAX_INFLIGHT`
 running at once. So the waiting line lives in *our* DB, fairly ordered
-([`db.wfq_claim`](src/db/queue.py) ranks each user's videos by age and takes
-everyone's oldest first, then everyone's second, …) — no user can starve the
-others. Set `ENABLE_FAIR_DISPATCH=false` to fall back to plain FIFO and see the
-difference. `DISPATCH_MAX_INFLIGHT` should equal your real capacity
+([`db.claim_within_capacity`](src/db/queue.py) ranks each user's videos by age
+and takes everyone's oldest first, then everyone's second, …) — no user can
+starve the others. Set `ENABLE_FAIR_DISPATCH=false` to fall back to plain FIFO
+and see the difference. `DISPATCH_MAX_INFLIGHT` should equal your real capacity
 (`worker machines × WORKER_CONCURRENCY`); anything above that would just pile up
 FIFO inside Prefect and defeat the fairness.
+
+That ceiling is enforced **across the fleet, not per worker**. Each replica runs
+its own dispatcher, and sizing a claim is a read (how many slots are free)
+followed by a write that spends what the read found — two of those interleave
+into two full ceilings' worth of admissions, measured at 8 in flight against a
+limit of 4 with `--scale worker=2`. Both steps therefore happen in one
+transaction behind a Postgres advisory lock, so the number means the same thing
+at any replica count.
 
 ```
 FIFO:  user A ▓▓▓▓▓▓▓▓▓▓ (50)  then→  user B ▓   ← B waits for all of A

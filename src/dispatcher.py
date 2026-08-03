@@ -11,13 +11,16 @@ and THIS loop admits them:
     schedule a Prefect run for each
 
 Because only ~capacity videos are ever handed to Prefect at once, the *waiting
-line lives in our DB, fairly ordered* (db.wfq_claim) rather than FIFO inside
-Prefect. No user can starve the others. Set ENABLE_FAIR_DISPATCH=false to fall
-back to immediate FIFO enqueue (useful for A/B teaching the difference).
+line lives in our DB, fairly ordered* (db.claim_within_capacity) rather than
+FIFO inside Prefect. No user can starve the others. Set ENABLE_FAIR_DISPATCH=false
+to fall back to immediate FIFO enqueue (useful for A/B teaching the difference).
 
-Runs as a background thread in worker.py. With one worker that's exact; with
-several, each runs a dispatcher — the atomic claim keeps videos handed out once,
-at worst mildly over-admitting (harmless; Prefect still caps execution).
+Runs as a background thread in worker.py, so there is one dispatcher per worker
+replica and the ceiling has to hold across all of them. It does not hold by
+itself: reading the free slots and claiming against that reading are two steps,
+and N dispatchers interleave them into N times the ceiling. db has both steps in
+one locked transaction for that reason — see db.claim_within_capacity, which is
+where the whole argument lives.
 """
 from __future__ import annotations
 
@@ -25,16 +28,22 @@ from . import config, db, jobs, ticker
 
 
 def dispatch_once() -> int:
-    """Admit as many fairly-chosen pending sources as free capacity allows.
+    """Admit as many fairly-chosen pending sources as free FLEET capacity allows.
     Returns how many were dispatched this tick.
 
     Only kinds with an ingest flow are claimed (jobs.INGEST_DEPLOYMENTS); the
     rest keep waiting as `pending`, which costs no capacity and loses nothing.
+
+    Sizing the claim and making it is one call on purpose. As two — a
+    count_inflight() here, a claim there — every dispatcher in the fleet sized
+    against the same stale count and the ceiling was enforced per worker rather
+    than across them.
+
+    Enqueueing stays out here, after the claim has committed: it is a network
+    round trip per row, and the claim holds a fleet-wide lock.
     """
-    slots = config.DISPATCH_MAX_INFLIGHT - db.count_inflight()
-    if slots <= 0:
-        return 0
-    claimed = db.wfq_claim(slots, jobs.dispatchable_kinds())
+    claimed = db.claim_within_capacity(config.DISPATCH_MAX_INFLIGHT,
+                                       jobs.dispatchable_kinds())
     for row in claimed:
         try:
             jobs.enqueue(row["id"], row["user_id"], row["kind"])
