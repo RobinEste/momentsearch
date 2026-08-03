@@ -414,6 +414,13 @@ MAX_TOP_K = _int("MAX_TOP_K", 12)
 CONFIDENCE_THRESHOLD = _float("CONFIDENCE_THRESHOLD", 0.2)              # visual (CLIP)
 TEXT_CONFIDENCE_THRESHOLD = _float("TEXT_CONFIDENCE_THRESHOLD", 0.35)  # transcript (bge)
 
+# Interleave the returned citations by kind so a cross-source answer reads as
+# one. Order only: it never changes which citations were retrieved, so recall
+# and every presence-based rubric check are unaffected (src/rag/search.py
+# ::_diversify says what the measurement was). Set 0 to see the raw ranking,
+# which is how the before/after in PRODUCT_EVAL.md was produced.
+CITATION_DIVERSITY = _envbool("CITATION_DIVERSITY", True)
+
 # --- Multimodal LLM (answer synthesis only — retrieval works without it) -----------
 # LLM_PROVIDER: openai | nvidia | anthropic ("openai" also covers any
 # OpenAI-compatible server via LLM_BASE_URL: Ollama, vLLM, OpenRouter, ...).
