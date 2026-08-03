@@ -1,6 +1,17 @@
-# Fly.io — one image, two process groups (same pattern as digital-twin-akash):
-#   api    — stateless, always-startable, auto-stops when idle
-#   worker — polls Prefect Cloud for ingest runs (outbound only, no ports)
+# Fly.io — one image, four process groups (same pattern as digital-twin-akash):
+#   api        — stateless, always-startable, auto-stops when idle
+#   worker     — polls Prefect Cloud for ingest runs (outbound only, no ports)
+#   clip       — the batch embedding lane: whole documents, from the workers
+#   clip-query — the interactive lane: single embeds, from the api only
+#
+# The last two are the same image and the same command. Why they are two
+# machines rather than one is measured, and the [processes] block says what the
+# numbers were: a query embed queueing behind a document batch cost the read
+# path 64ms -> 2788ms, peaking at 20397ms.
+#
+# Four groups is four machines. Only `api` auto-stops; the rest bill while they
+# run, and two of them hold a 2GB model. `fly scale count clip=0 clip-query=0
+# worker=0` after a demo, or `fly apps destroy` when done with it.
 #
 # Bucket: `fly storage create` provisions Tigris and injects the AWS_* secrets
 # automatically — then just `fly secrets set STORAGE_PROVIDER=flyio`.
@@ -10,8 +21,16 @@
 # fly deploy --ha=false
 # fly scale count worker=2        # more ingest throughput, anytime
 
-app = 'momentsearch'
-primary_region = 'iad'
+app = 'momentsearch-rbertus'
+# Frankfurt, because that is where the data already is: Neon
+# (…c-4.eu-central-1.aws.neon.tech) and Qdrant Cloud
+# (…eu-central-1-0.aws.cloud.qdrant.io) both sit in AWS eu-central-1. One
+# retrieve() makes two Qdrant calls and one Postgres call, and the ingest writes
+# to both continuously — from iad every one of those crosses the Atlantic for
+# ~90ms of round trip that buys nothing. Co-location with the stores beats
+# co-location with the developer. (It also keeps the whole thing inside the EU,
+# which is the house rule for anything that might ever hold personal data.)
+primary_region = 'fra'
 
 [build]
 
@@ -37,7 +56,7 @@ primary_region = 'iad'
   # batch side (docker-compose.yml). A process group is its own machine, so
   # here the capacity is bought rather than allocated and that cap has no
   # equivalent — do NOT port it.
-  api = 'sh -c "CLIP_SERVICE_URL=http://clip-query.process.momentsearch.internal:8001 uvicorn src.app:app --host 0.0.0.0 --port 8000"'
+  api = 'sh -c "CLIP_SERVICE_URL=http://clip-query.process.momentsearch-rbertus.internal:8001 uvicorn src.app:app --host 0.0.0.0 --port 8000"'
   worker = 'python -m src.worker'
   # Must bind IPv6 (::) — Fly private networking (*.internal, used by
   # CLIP_SERVICE_URL) is IPv6-only; 0.0.0.0 would be unreachable internally.
@@ -54,7 +73,7 @@ primary_region = 'iad'
   #
   # The app name now appears THREE times in this file: `app = '…'`, this line,
   # and the api's inline override. Renaming the app means changing all three.
-  CLIP_SERVICE_URL = 'http://clip.process.momentsearch.internal:8001'
+  CLIP_SERVICE_URL = 'http://clip.process.momentsearch-rbertus.internal:8001'
 
 # Infra backstop: if a machine's process ever exits (crash, OOM, a dependency
 # outage that slips past the code's own retry loop), always bring it back —
