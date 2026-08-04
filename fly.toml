@@ -9,9 +9,11 @@
 # numbers were: a query embed queueing behind a document batch cost the read
 # path 64ms -> 2788ms, peaking at 20397ms.
 #
-# Four groups is four machines. Only `api` auto-stops; the rest bill while they
-# run, and two of them hold a 2GB model. `fly scale count clip=0 clip-query=0
-# worker=0` after a demo, or `fly apps destroy` when done with it.
+# Four groups is four machines, and all four bill while they run — two of them
+# hold a 2GB model, and `api` is deliberately kept alive rather than scaled to
+# zero (see min_machines_running below for the measurement behind that).
+# `fly scale count clip=0 clip-query=0 worker=0` after a demo, or
+# `fly apps destroy` when done with it.
 #
 # Bucket: `fly storage create` provisions Tigris and injects the AWS_* secrets
 # automatically — then just `fly secrets set STORAGE_PROVIDER=flyio`.
@@ -96,7 +98,17 @@ primary_region = 'fra'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  # Keep ONE api machine alive. Scale-to-zero is cheaper and it costs the first
+  # visitor the whole request: measured on this app, the proxy woke a stopped
+  # machine at 13:32:51 and gave up after 15 attempts in 8.3s, while uvicorn
+  # only bound at 13:33:05 — ~13s, because importing src.app pulls in torch and
+  # fastembed. The caller does not get a slow 200, it gets a connection error;
+  # eval.py scored app_up as 0 for exactly that reason, and every request after
+  # it passed in ~230ms. Auto-start cannot fix this: the wait is the import, not
+  # the boot. Until the heavy imports are deferred past the first bind, an
+  # always-on api is the difference between "reachable" and "reachable if you
+  # ask twice".
+  min_machines_running = 1
   processes = ['api']
 
 [[vm]]
