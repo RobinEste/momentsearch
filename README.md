@@ -150,6 +150,42 @@ uvicorn src.clip_service:app --port 8001  # CLIP service (optional; else set CLI
 python -m src.seed                        # one-shot: index the 4 samples
 ```
 
+## How I ran it
+
+**Providers.** Answer synthesis goes to Anthropic `claude-haiku-4-5-20251001`.
+Vision-capable is a hard requirement: the synthesis step is handed the actual
+frames rather than a description of them. Embeddings are local and keyless on
+both branches — CLIP `clip-ViT-B-32` for frames, fastembed `bge-small` for text,
+slides included — so no LLM sits in the ingest path at all. Managed services:
+Neon Postgres and Qdrant Cloud (both `eu-central-1`) plus Prefect Cloud for the
+queue.
+
+**Deployed** on Fly.io as `momentsearch-rbertus`, region `fra` — the same region
+as Neon and Qdrant, because one `retrieve()` makes three calls to those stores
+and crossing the Atlantic for each buys nothing. One image, four process groups
+(`api`, `worker`, `clip`, `clip-query`); the query lane is a separate machine
+from the batch lane, and that split is what keeps search fast during a backfill.
+Frames and uploaded documents live in a Tigris bucket (`STORAGE_PROVIDER=flyio`),
+so citation thumbnails are presigned straight from object storage.
+
+Four practical differences from the instructions above, all of them things that
+cost me time:
+
+- **`python3`, not `python`.** On macOS the bare `python` does not exist, so
+  every `python eval/eval.py` in this README needs the 3.
+- **Secrets are injected, never written to a file.** There is no `.env` on my
+  machine; the stack starts as
+  `infisical run --env=dev -- docker compose up -d`. Without that wrapper the
+  seed gate has no `DATABASE_URL`, exits non-zero, and
+  `depends_on: service_completed_successfully` then keeps `api` and `worker`
+  from starting at all — which reads as a broken compose file rather than as a
+  missing secret.
+- **`docker compose start`, not `up`, to bring a stopped stack back.** `up`
+  re-runs the seed gate; `start` does not. `bench.py --resilience` depends on
+  this when it restarts the worker it just killed.
+- **Run everything from the repo root**, not from the assignment folder in the
+  course repo. Locally the API is on `http://localhost:8100`.
+
 ## The write path — upload to searchable vectors
 
 1. **Presign** — `POST /api/videos/presign {filename, content_type, size}`
