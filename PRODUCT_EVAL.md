@@ -1,4 +1,4 @@
-# Product Evaluation — Moment Search at Scale
+# Product Evaluation — Momentsearch at Scale
 
 - **Student:** Robin Bertus
 - **Date:** 2026-08-06
