@@ -5,7 +5,7 @@ Student: Robin Bertus  ·  Base URL: https://momentsearch-rbertus.fly.dev
 | Check | Result | Evidence |
 |---|---|---|
 | app_up | ✅ pass | GET / -> 200 |
-| documents_async | ✅ pass | POST /admin/documents -> 202 in 197ms |
+| documents_async | ✅ pass | POST /admin/documents -> 202 in 131ms |
 | sources_status | ✅ pass | GET /admin/sources -> 200, kinds=['deck', 'paper', 'video'] |
 | paper_indexed | ✅ pass | page-locator citation present: True |
 | deck_indexed | ✅ pass | slide-locator citation present: True |
